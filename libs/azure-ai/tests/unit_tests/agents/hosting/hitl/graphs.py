@@ -17,7 +17,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any, ClassVar, Optional
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -82,6 +86,31 @@ class ScriptedModel:
         return queue.pop(0)
 
 
+class ScriptedToolCallingModel(BaseChatModel):
+    """Chat model that supports ``create_agent`` tool binding."""
+
+    key: str
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-tool-calling"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> ScriptedToolCallingModel:
+        del tools, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        message = ScriptedModel(self.key).invoke(messages)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
 def build_ask_human_graph(key: str) -> CompiledStateGraph:
     """Agent that pauses in a dedicated ``ask_human`` node.
 
@@ -126,16 +155,46 @@ def build_ask_human_graph(key: str) -> CompiledStateGraph:
     return builder.compile(checkpointer=InMemorySaver())
 
 
+def build_hitl_middleware_graph(
+    key: str,
+    tool_calls: list[str],
+    *,
+    allowed_decisions: list[str] | None = None,
+) -> CompiledStateGraph:
+    """Agent guarded by LangChain's HumanInTheLoopMiddleware."""
+
+    @tool
+    def risky_tool(value: str) -> str:
+        """Record a risky tool execution."""
+        tool_calls.append(value)
+        return f"executed:{value}"
+
+    return create_agent(
+        model=ScriptedToolCallingModel(key=key),
+        tools=[risky_tool],
+        middleware=[
+            HumanInTheLoopMiddleware(
+                interrupt_on={
+                    "risky_tool": {
+                        "allowed_decisions": allowed_decisions or ["approve", "reject"]
+                    }
+                }
+            )
+        ],
+        checkpointer=InMemorySaver(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Minimal single-pause graphs
 # ---------------------------------------------------------------------------
 
 
-def build_simple_interrupt_graph() -> CompiledStateGraph:
+def build_simple_interrupt_graph(value: Any = "name?") -> CompiledStateGraph:
     """Minimal single-pause graph, reused by the transport-level tests."""
 
     def ask(state: MessagesState) -> dict[str, Any]:
-        return {"messages": [AIMessage(content=f"ok:{interrupt('name?')}")]}
+        return {"messages": [AIMessage(content=f"ok:{interrupt(value)}")]}
 
     builder = StateGraph(MessagesState)
     builder.add_node("ask", ask)

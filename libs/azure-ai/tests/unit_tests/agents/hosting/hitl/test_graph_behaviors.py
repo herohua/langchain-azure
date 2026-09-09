@@ -738,9 +738,9 @@ class TestApproveOrReject:
         """``resume=false`` is a real answer, not a missing one.
 
         Distinct from the ``mcp_approval_response{approve:false}`` path,
-        which fails the turn: here the *graph* owns the rejection semantics,
-        so a falsy resume value has to reach the node intact and route it to
-        the cancel branch.
+        which is reserved for compatible LangChain HITL middleware requests:
+        here the *graph* owns the rejection semantics, so a falsy resume value
+        has to reach the node intact and route it to the cancel branch.
         """
         host = ResponsesHostServer(build_approval_routing_graph())
         conversation_id = f"conv-approve-{decision}"

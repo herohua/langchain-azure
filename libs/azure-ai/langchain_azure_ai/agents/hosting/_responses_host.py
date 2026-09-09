@@ -559,9 +559,9 @@ class ResponsesHostServer:
         pending interrupts, or an ``mcp_approval_response`` whose
         ``approval_request_id`` matches. The former decodes its
         ``output`` JSON into a :class:`Command`; the latter resumes with
-        the interrupt's own value when ``approve=True``. Rejections
-        (``approve=False``) are surfaced via :meth:`detect_rejection`
-        instead. Override to plug in custom resume protocols.
+        the interrupt's own value when ``approve=True``. Compatible LangChain
+        ``HumanInTheLoopMiddleware`` interrupts instead receive one approve or
+        reject decision per action. Override to plug in custom resume protocols.
 
         Args:
             request: The parsed create-response request.
@@ -585,12 +585,11 @@ class ResponsesHostServer:
     ) -> Optional[str]:
         """Detect a client-issued rejection of a pending interrupt.
 
-        Default implementation scans the request for an
-        ``mcp_approval_response`` item whose ``approval_request_id``
-        matches a pending interrupt and whose ``approve`` is ``False``.
-        When found, :meth:`handle_create` short-circuits the turn into
-        ``response.failed(code="interrupt_rejected", …)`` instead of
-        driving the graph.
+        Default implementation scans the request for an unsupported
+        ``mcp_approval_response`` item whose ``approval_request_id`` matches a
+        pending interrupt. When found, :meth:`handle_create`
+        short-circuits the turn into
+        ``response.failed(code="interrupt_rejected", …)``.
 
         Override to plug in custom rejection protocols (e.g. recognising
         a sentinel ``function_call_output`` payload as a rejection).
@@ -810,10 +809,10 @@ class ResponsesHostServer:
                      ``interrupt()`` pauses on the checkpointed
            thread and:
 
-           - if the request contains an ``mcp_approval_response`` with
-             ``approve=false`` for a pending interrupt, emits
-             ``response.failed(code="interrupt_rejected", …)`` and
-             stops;
+           - if the request contains an unsupported
+             ``mcp_approval_response{approve:false}``, emits
+             ``response.failed(code="interrupt_rejected", …)``
+             and stops;
            - otherwise tries to resume from a matching
              ``function_call_output`` (rich) or
              ``mcp_approval_response{approve:true}`` (echo the
@@ -908,9 +907,8 @@ class ResponsesHostServer:
                 if pending:
                     _add_request_hosting_features(HostingFeature.HITL)
                     # HITL:
-                    # Rejection short-circuits the turn into ``response.failed``
-                    # so a client-issued ``mcp_approval_response{approve:false}``
-                    # is not silently dropped.
+                    # Unknown rejection formats must not be guessed or used to
+                    # drive the graph; the pending interrupt stays recoverable.
                     rejection_message = await self.detect_rejection(
                         request, context, pending
                     )

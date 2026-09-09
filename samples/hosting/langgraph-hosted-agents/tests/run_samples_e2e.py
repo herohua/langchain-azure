@@ -1044,7 +1044,10 @@ def check_06_pause_then_resume() -> None:
         err = secondb_payload.get("error") or {}
         _assert(
             err.get("code") == "interrupt_rejected",
-            f"error.code == interrupt_rejected (got {err.get('code')!r})",
+            (
+                "error.code == interrupt_rejected "
+                f"(got {err.get('code')!r})"
+            ),
         )
         _assert(
             approval_id_b in (err.get("message") or ""),

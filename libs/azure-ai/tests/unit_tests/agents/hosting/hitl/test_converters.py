@@ -258,13 +258,122 @@ class TestApprovalResumeChannel:
         assert command.resume == {"question": "Where?"}
         assert consumed == frozenset({"int-1"})
 
-    def test_approve_false_yields_no_command(self) -> None:
-        # Rejection is surfaced via ``detect_approval_rejection``, not here.
-        pending = pending_interrupt(id="int-1")
-        items = [_approval_response("int-1", False)]
+    def test_approve_true_resumes_hitl_middleware_with_approvals(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [
+                    {"name": "tool_a", "args": {}},
+                    {"name": "tool_b", "args": {}},
+                ],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["approve"]},
+                    {"action_name": "tool_b", "allowed_decisions": ["approve"]},
+                ],
+            },
+        )
+        command, consumed = parse_resume_command(
+            [_approval_response("int-1", True)],
+            (pending,),
+        )
+        assert command is not None
+        assert command.resume == {
+            "int-1": {"decisions": [{"type": "approve"}, {"type": "approve"}]}
+        }
+        assert consumed == frozenset({"int-1"})
+
+    def test_disallowed_middleware_approval_is_not_consumed(self) -> None:
+        value = {
+            "action_requests": [{"name": "tool_a", "args": {}}],
+            "review_configs": [
+                {"action_name": "tool_a", "allowed_decisions": ["reject"]}
+            ],
+        }
+        pending = pending_interrupt(id="int-1", value=value)
+        items = [_approval_response("int-1", True)]
+
         command, consumed = parse_resume_command(items, (pending,))
+
         assert command is None
         assert consumed == frozenset()
+        assert detect_approval_rejection(items, (pending,)) is not None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"action_requests": "ordinary business field"},
+            {"review_configs": {"owner": "ordinary business field"}},
+            {
+                "action_requests": [{"name": "tool_a", "args": {}}],
+                "review_configs": [],
+            },
+            {
+                "action_requests": [{"name": "tool_a"}],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["approve"]}
+                ],
+            },
+        ],
+    )
+    def test_ordinary_dict_with_hitl_field_names_is_echoed(self, value: Any) -> None:
+        pending = pending_interrupt(id="int-1", value=value)
+        items = [_approval_response("int-1", True)]
+
+        command, consumed = parse_resume_command(items, (pending,))
+
+        assert command is not None
+        assert command.resume == value
+        assert consumed == frozenset({"int-1"})
+        assert detect_approval_rejection(items, (pending,)) is None
+
+    def test_approve_false_resumes_hitl_middleware_with_rejection(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [{"name": "delete_file", "args": {}}],
+                "review_configs": [
+                    {
+                        "action_name": "delete_file",
+                        "allowed_decisions": ["approve", "reject"],
+                    }
+                ],
+            },
+        )
+        items = [_approval_response("int-1", False, reason="Not authorized")]
+        command, consumed = parse_resume_command(items, (pending,))
+        assert command is not None
+        assert command.resume == {
+            "int-1": {"decisions": [{"type": "reject", "message": "Not authorized"}]}
+        }
+        assert consumed == frozenset({"int-1"})
+
+    def test_rejects_every_action_in_one_middleware_interrupt(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [
+                    {"name": "tool_a", "args": {}},
+                    {"name": "tool_b", "args": {}},
+                ],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["reject"]},
+                    {"action_name": "tool_b", "allowed_decisions": ["reject"]},
+                ],
+            },
+        )
+        command, _ = parse_resume_command(
+            [_approval_response("int-1", False, reason="Denied")],
+            (pending,),
+        )
+        assert command is not None
+        assert command.resume == {
+            "int-1": {
+                "decisions": [
+                    {"type": "reject", "message": "Denied"},
+                    {"type": "reject", "message": "Denied"},
+                ]
+            }
+        }
 
     def test_function_call_output_wins_over_approval(self) -> None:
         pending = pending_interrupt(id="int-1", value="original")
@@ -276,6 +385,25 @@ class TestApprovalResumeChannel:
         assert command is not None
         # function_call_output (richer payload) wins over the approval echo.
         assert command.resume == "Seattle"
+        assert consumed == frozenset({"int-1"})
+
+    def test_function_call_output_wins_over_rejection(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [{"name": "tool_a", "args": {}}],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["reject"]}
+                ],
+            },
+        )
+        items = [
+            _approval_response("int-1", False, reason="Denied"),
+            _tool_output("int-1", '{"resume": "override"}'),
+        ]
+        command, consumed = parse_resume_command(items, (pending,))
+        assert command is not None
+        assert command.resume == "override"
         assert consumed == frozenset({"int-1"})
 
     def test_approval_for_unknown_id_is_ignored(self) -> None:
@@ -370,15 +498,38 @@ class TestParallelInterruptResumeMap:
         assert command.resume == {"int-a": "A", "int-b": "echo-me"}
         assert consumed == frozenset({"int-a", "int-b"})
 
-    def test_map_skips_rejected_approvals(self) -> None:
-        pending = (pending_interrupt(id="int-a"), pending_interrupt(id="int-b"))
+    def test_map_combines_approval_and_rejection(self) -> None:
+        pending = (
+            pending_interrupt(id="int-a"),
+            pending_interrupt(
+                id="int-b",
+                value={
+                    "action_requests": [{"name": "tool_b", "args": {}}],
+                    "review_configs": [
+                        {
+                            "action_name": "tool_b",
+                            "allowed_decisions": ["reject"],
+                        }
+                    ],
+                },
+            ),
+        )
         items = [
-            _tool_output("int-a", "A"),
-            _approval_response("int-b", False),
+            _tool_output(
+                "int-a",
+                json.dumps({"resume": "A", "update": {"a": 1}, "goto": "route-a"}),
+            ),
+            _approval_response("int-b", False, reason="Denied"),
         ]
-        command, _ = parse_resume_command(items, pending)
+        command, consumed = parse_resume_command(items, pending)
         assert command is not None
-        assert command.resume == {"int-a": "A"}
+        assert command.resume == {
+            "int-a": "A",
+            "int-b": {"decisions": [{"type": "reject", "message": "Denied"}]},
+        }
+        assert command.update == {"a": 1}
+        assert command.goto == "route-a"
+        assert consumed == frozenset({"int-a", "int-b"})
 
     def test_routes_by_id_not_by_position(self) -> None:
         # Clients are under no obligation to answer in emission order, and
@@ -514,6 +665,39 @@ class TestDetectApprovalRejection:
             _tool_output("int-1", "  "),
             _approval_response("int-1", False),
         ]
+        assert detect_approval_rejection(items, (pending,)) is not None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "not middleware",
+            {"action_requests": [], "review_configs": []},
+            {
+                "action_requests": [{"name": "tool_a"}],
+                "review_configs": [],
+            },
+            {
+                "action_requests": [{"name": "tool_a"}],
+                "review_configs": [
+                    {"action_name": "tool_b", "allowed_decisions": ["reject"]}
+                ],
+            },
+            {
+                "action_requests": [{"name": "tool_a"}],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["approve"]}
+                ],
+            },
+        ],
+    )
+    def test_unsupported_rejection_is_not_resumed(self, value: Any) -> None:
+        pending = pending_interrupt(id="int-1", value=value)
+        items = [_approval_response("int-1", False)]
+
+        command, consumed = parse_resume_command(items, (pending,))
+
+        assert command is None
+        assert consumed == frozenset()
         assert detect_approval_rejection(items, (pending,)) is not None
 
 
