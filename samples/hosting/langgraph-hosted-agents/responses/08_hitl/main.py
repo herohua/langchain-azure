@@ -7,9 +7,17 @@ serialized to the wire as the **standard OpenAI ``mcp_approval_request``
 output item**, so any Responses-API client that already supports MCP
 server approvals can drive this agent without code changes.
 
-For each pending interrupt the host emits one ``mcp_approval_request``.
-Clients respond with ``mcp_approval_response``. The graph receives
-``{"approve": bool}`` plus ``reason`` when the client supplied it.
+For each pending interrupt the host emits TWO paired output items in
+the same response, both keyed by the same LangGraph interrupt id:
+
+* an ``mcp_approval_request`` item (``server_label == "langgraph"``,
+  ``arguments`` JSON contains the proposed tool call) — the
+  OpenAI-standard channel; clients respond with an
+  ``mcp_approval_response``, and
+* a ``function_call`` item with
+  ``name == "__hosted_agent_adapter_interrupt__"`` — a parallel rich
+  channel for callers that want to send arbitrary resume payloads
+  (``{"resume", "update", "goto"}``) via ``function_call_output``.
 
 State is persisted by a checkpointer keyed by the ``conversation`` id, so the
 second request continues the paused run. Local runs use ``InMemorySaver``;
@@ -42,11 +50,18 @@ host resumes the graph and executes the tool::
 
     curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"mcp_approval_response","approval_request_id":"<id>","approve":true}]}'
 
-**Reject.** The graph resumes with the rejection object and decides the
-business behavior::
+**Reject.** The turn ends with ``response.failed``
+``code="interrupt_rejected"``; the pending interrupt remains in the
+checkpoint so the client can retry::
 
     curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"mcp_approval_response","approval_request_id":"<id>","approve":false,"reason":"user canceled"}]}'
 
+**Advanced — rich resume via ``function_call_output``.** When you need
+to inject a custom resume value or drive a LangGraph ``Command`` with
+``update``/``goto`` fields, target the paired ``function_call`` item
+instead (its ``call_id`` is the same interrupt id)::
+
+    curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"function_call_output","call_id":"<id>","output":"{\\"resume\\": {\\"tool\\":\\"get_weather\\",\\"arguments\\":{\\"location\\":\\"Vancouver\\"}}}"}]}'
 """
 
 from __future__ import annotations
@@ -59,9 +74,9 @@ from azure.ai.agentserver.core import AgentConfig
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -141,21 +156,16 @@ def _build_graph(checkpointer: BaseCheckpointSaver[Any]) -> "object":
             "arguments": tool_call["args"],
         }
 
-        decision: Any = interrupt(proposed)
-        if not isinstance(decision, dict) or not decision.get("approve"):
-            reason = (
-                decision.get("reason", "rejected")
-                if isinstance(decision, dict)
-                else "rejected"
-            )
-            return {
-                "messages": [
-                    ToolMessage(content=reason, tool_call_id=tool_call["id"])
-                ]
-            }
+        # On approve=True, the resume value is the original ``proposed``
+        # dict. On a ``function_call_output``-style resume the client can
+        # send a different payload (e.g. to override the arguments) — we
+        # use whatever the client returned for the actual invocation.
+        approved: Any = interrupt(proposed)
+        if not isinstance(approved, dict) or "tool" not in approved:
+            approved = proposed
 
-        tool_fn = _TOOLS_BY_NAME[proposed["tool"]]
-        result = tool_fn.invoke(proposed["arguments"])
+        tool_fn = _TOOLS_BY_NAME[approved["tool"]]
+        result = tool_fn.invoke(approved.get("arguments") or {})
         return {
             "messages": [ToolMessage(content=str(result), tool_call_id=tool_call["id"])]
         }

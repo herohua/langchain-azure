@@ -708,7 +708,7 @@ async def test_recovery_replays_hitl_approval_without_current_response_checkpoin
     )
 
     assert isinstance(graph_input, Command)
-    assert graph_input.resume == {"approve": True}
+    assert graph_input.resume == pending.value
     assert captured["state_config"]["configurable"]["checkpoint_id"] == (
         "checkpoint-parent"
     )
@@ -747,11 +747,12 @@ async def test_recovery_replays_hitl_rejection_without_current_response_checkpoi
         )
     ]
 
-    assert captured["input"].resume == {"approve": False}
+    assert "input" not in captured
     assert captured["state_config"]["configurable"]["checkpoint_id"] == (
         "checkpoint-parent"
     )
-    assert any(event.get("type") == "response.completed" for event in events)
+    failed = next(event for event in events if event.get("type") == "response.failed")
+    assert failed["response"]["error"]["code"] == "interrupt_rejected"
 
 
 @pytest.mark.parametrize(

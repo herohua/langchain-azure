@@ -9,10 +9,30 @@ The pause is checkpointed and surfaced on
 invoking the graph again with a :class:`langgraph.types.Command` carrying
 ``resume`` / ``update`` / ``goto`` fields.
 
-We map this onto the OpenAI Responses API by emitting an
-``mcp_approval_request`` per pending interrupt. The client resumes by posting
-a matching ``mcp_approval_response``; its ``approve`` value and optional
-``reason`` become the value returned by ``interrupt()``.
+We map this onto the OpenAI Responses API by emitting *two* output items
+per pending interrupt so off-the-shelf clients can drive resume through
+either of two standard channels:
+
+1. A ``function_call`` output item named
+   :data:`HITL_FUNCTION_NAME` with ``call_id == interrupt.id``. The
+   ``arguments`` field carries the ``{"interrupt_id", "value"}`` envelope
+   (JSON-encoded).
+2. An ``mcp_approval_request`` output item with a storage-compatible generated
+    ``mcpr_*`` id, ``server_label == "langgraph"``, the same ``name``, and the
+    same ``arguments`` envelope.
+
+Both items carry the same ``interrupt.id`` in their arguments. The client
+resumes by posting either:
+
+* a ``function_call_output`` input item (rich payload — can carry
+  ``{"resume"|"update"|"goto"}``), or
+* an ``mcp_approval_response`` input item (approve-only — ``approve=true``
+  resumes with the original interrupt value echoed back; ``approve=false``
+  is surfaced to the host as a rejection signal).
+
+When both shapes target the same ``interrupt.id`` in one request,
+``function_call_output`` wins (it carries the richer payload) and a
+warning is logged.
 """
 
 from __future__ import annotations
@@ -27,6 +47,7 @@ from azure.ai.agentserver.responses import ResponseEventStream
 from azure.ai.agentserver.responses.models import (
     FunctionCallOutputItemParam,
     ItemFunctionToolCall,
+    MCPApprovalResponse,
 )
 from azure.ai.agentserver.responses.models._generated import (
     OutputItemMcpApprovalRequest,
@@ -40,7 +61,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HITL_FUNCTION_NAME: Final[str] = "__hosted_agent_adapter_interrupt__"
-"""Reserved ``mcp_approval_request.name`` used for a LangGraph interrupt.
+"""Reserved ``function_call.name`` / ``mcp_approval_request.name`` used to
+surface a LangGraph interrupt.
 
 The string value matches the ``HUMAN_IN_THE_LOOP_FUNCTION_NAME`` used by
 ``azure-ai-agentserver-langgraph`` so clients can share the same
@@ -59,6 +81,15 @@ def _is_function_call_output(item: Any) -> TypeGuard[FunctionCallOutputItemParam
         and item.get("type") == "function_call_output"
         and isinstance(item.get("call_id"), str)
         and "output" in item
+    )
+
+
+def _is_mcp_approval_response(item: Any) -> TypeGuard[MCPApprovalResponse]:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "mcp_approval_response"
+        and isinstance(item.get("approval_request_id"), str)
+        and isinstance(item.get("approve"), bool)
     )
 
 
@@ -170,8 +201,12 @@ async def track_pending_interrupts(
 def interrupt_arguments_json(interrupt: Interrupt) -> str:
     """Render the ``{"interrupt_id", "value"}`` envelope as a JSON string.
 
-    The envelope is used as the ``arguments`` payload on the emitted
-    ``mcp_approval_request`` item.
+    The envelope is used as the ``arguments`` payload on both the
+    ``function_call`` and ``mcp_approval_request`` items emitted by
+    :func:`emit_interrupts`. Wrapping the raw value lets clients render
+    HITL prompts uniformly across the two channels and lets the
+    approval-response decode path validate the request id without
+    server-side storage.
 
     Non-serializable interrupt values fall back to their ``str()``
     representation so emission cannot fail at the wire layer.
@@ -205,14 +240,24 @@ def interrupt_output_items(
             continue
         suffix = _approval_id_suffix(interrupt.id)
         arguments = interrupt_arguments_json(interrupt)
-        output.append(
-            {
-                "type": "mcp_approval_request",
-                "id": f"mcpr_{suffix}",
-                "server_label": HITL_MCP_SERVER_LABEL,
-                "name": HITL_FUNCTION_NAME,
-                "arguments": arguments,
-            }
+        output.extend(
+            [
+                {
+                    "type": "function_call",
+                    "id": f"fc_{suffix}",
+                    "call_id": interrupt.id,
+                    "name": HITL_FUNCTION_NAME,
+                    "arguments": arguments,
+                    "status": "completed",
+                },
+                {
+                    "type": "mcp_approval_request",
+                    "id": f"mcpr_{suffix}",
+                    "server_label": HITL_MCP_SERVER_LABEL,
+                    "name": HITL_FUNCTION_NAME,
+                    "arguments": arguments,
+                },
+            ]
         )
     return output
 
@@ -263,10 +308,23 @@ def parse_resume_command(
 ) -> tuple[Command | None, frozenset[str]]:
     """Build a resume :class:`Command` from request input items, if present.
 
-    Approval responses are keyed by the emitted request ID. Their required
-    ``approve`` field and optional ``reason`` field become the resume value.
-    Unknown, stale, malformed, and duplicate approvals raise ``ValueError``
-    before the graph is called.
+    Two input shapes are accepted, both keyed by ``interrupt.id``:
+
+    * :class:`FunctionCallOutputItemParam` matched by ``call_id``. Its
+      ``output`` field is decoded — a JSON object with any of
+      ``{"resume", "update", "goto"}`` populates the :class:`Command`;
+      anything else (string, malformed JSON, list of content parts) is
+      treated as the raw resume value.
+    * :class:`MCPApprovalResponse` matched by ``approval_request_id``.
+      ``approve=True`` resumes with the original interrupt value;
+      ``approve=False`` is *not* handled here — use
+      :func:`detect_approval_rejection` to surface the rejection to the
+      host.
+
+    Conflict resolution: when both shapes target the same interrupt id
+    in one request, the ``function_call_output`` wins (richer payload)
+    and a warning is logged. This is a deliberate, deterministic
+    departure from Agent Framework's order-dependent last-write-wins.
 
     Resume shape: with a single pending interrupt the resume value is
     passed through as-is (``Command(resume=value)``). With *parallel*
@@ -285,97 +343,133 @@ def parse_resume_command(
         A ``(command, consumed_call_ids)`` pair. ``command`` is ``None``
         when no matching resume item was found.
     """
-    pending_by_id = {interrupt.id: interrupt for interrupt in pending}
-    approvals: dict[str, tuple[dict[str, Any], str]] = {}
-    approval_indexes = [
-        index
-        for index, item in enumerate(items)
-        if isinstance(item, dict) and item.get("type") == "mcp_approval_response"
-    ]
-    if approval_indexes and len(approval_indexes) != len(items):
-        raise ValueError(
-            "mcp_approval_response items cannot be submitted with other input."
-        )
-    legacy_commands: dict[str, tuple[Command, bool]] = {}
+    if not pending:
+        return None, frozenset()
+
+    pending_by_id: dict[str, Interrupt] = {it.id: it for it in pending}
+    # interrupt id -> (decoded command, explicitly carries resume), in
+    # first-seen order. ``Command.resume is None`` alone cannot distinguish
+    # an omitted resume from an explicit ``{"resume": null}``.
+    commands: dict[str, tuple[Command, bool]] = {}
+    # interrupt id -> the wire id that produced it (the encoded ``mcpr_*``
+    # id for approvals, the raw interrupt id for function call outputs).
+    consumed: dict[str, str] = {}
+
+    # Pass 1 — prefer function_call_output (richer payload).
     for item in items:
         if not _is_function_call_output(item):
             continue
         call_id = item["call_id"]
-        if call_id in pending_by_id and call_id not in legacy_commands:
-            decoded = _decode_command(item["output"])
-            if decoded is not None:
-                legacy_commands[call_id] = decoded
-    for index, item in enumerate(items):
-        if not isinstance(item, dict) or item.get("type") != "mcp_approval_response":
+        if call_id not in pending_by_id or call_id in commands:
             continue
-        approval_id = item.get("approval_request_id")
-        if not isinstance(approval_id, str) or not approval_id:
-            raise ValueError(
-                f"mcp_approval_response item {index} must include a non-empty "
-                "'approval_request_id' string."
-            )
-        if not isinstance(item.get("approve"), bool):
-            raise ValueError(
-                f"mcp_approval_response item {index} must include a boolean "
-                "'approve' field."
-            )
-        if item.get("reason") is not None and not isinstance(item["reason"], str):
-            raise ValueError(
-                f"mcp_approval_response item {index} field 'reason' must be a string."
-            )
-        interrupt_id = _interrupt_id_from_approval_id(approval_id, pending_by_id)
-        if interrupt_id not in pending_by_id:
-            raise ValueError(
-                f"Approval request id '{approval_id}' is not a current pending "
-                "interrupt."
-            )
-        if interrupt_id in approvals:
-            raise ValueError(
-                f"Duplicate mcp_approval_response for pending interrupt "
-                f"'{interrupt_id}'."
-            )
-        resume: dict[str, Any] = {"approve": item["approve"]}
-        if isinstance(item.get("reason"), str):
-            resume["reason"] = item["reason"]
-        approvals[interrupt_id] = (resume, approval_id)
+        decoded = _decode_command(item["output"])
+        if decoded is None:
+            continue
+        command, has_resume = decoded
+        _warn_if_competing_approval(items, call_id)
+        commands[call_id] = (command, has_resume)
+        consumed[call_id] = call_id
 
-    if not approvals and not legacy_commands:
+    # Pass 2 — fall back to mcp_approval_response (approve-only).
+    for item in items:
+        if not _is_mcp_approval_response(item):
+            continue
+        approval_id = item["approval_request_id"]
+        interrupt_id = _interrupt_id_from_approval_id(approval_id, pending_by_id)
+        interrupt_obj = pending_by_id.get(interrupt_id)
+        if interrupt_obj is None or interrupt_id in commands:
+            continue
+        if not item["approve"]:
+            # Rejection is surfaced via ``detect_approval_rejection``
+            # rather than as a ``Command``. Skip it here.
+            continue
+        commands[interrupt_id] = (Command(resume=interrupt_obj.value), True)
+        consumed[interrupt_id] = approval_id
+
+    if not commands:
         return None, frozenset()
 
-    if legacy_commands:
-        consumed_ids = frozenset(legacy_commands)
-        if len(pending_by_id) == 1:
-            interrupt_id, (command, has_resume) = next(iter(legacy_commands.items()))
-            if has_resume and command.resume is None:
-                command = Command(
-                    resume={interrupt_id: None},
-                    update=command.update,
-                    goto=command.goto,
-                )
-            return command, consumed_ids
-        commands = [command for command, _ in legacy_commands.values()]
-        return (
-            Command(
-                resume={
-                    key: command.resume
-                    for key, (command, has_resume) in legacy_commands.items()
-                    if has_resume
-                }
-                or None,
-                update=_merge_command_updates(commands),
-                goto=_merge_command_gotos(commands),
-            ),
-            consumed_ids,
-        )
-
-    consumed_ids = frozenset(approval_id for _, approval_id in approvals.values())
+    consumed_ids = frozenset(consumed.values())
     if len(pending_by_id) == 1:
-        return Command(resume=next(iter(approvals.values()))[0]), consumed_ids
+        # Exactly one pause — LangGraph accepts the bare resume value.
+        interrupt_id, (command, has_resume) = next(iter(commands.items()))
+        if has_resume and command.resume is None:
+            # ``Command(resume=None)`` means no resume; an id-keyed map is
+            # required to pass an explicit null value through to interrupt().
+            command = Command(
+                resume={interrupt_id: None},
+                update=command.update,
+                goto=command.goto,
+            )
+        return command, consumed_ids
 
+    # Parallel pauses — LangGraph matches resume values by interrupt id.
+    resume = {
+        interrupt_id: command.resume
+        for interrupt_id, (command, has_resume) in commands.items()
+        if has_resume
+    }
+    decoded_commands = [command for command, _ in commands.values()]
     return (
-        Command(resume={key: value for key, (value, _) in approvals.items()}),
+        Command(
+            resume=resume or None,
+            update=_merge_command_updates(decoded_commands),
+            goto=_merge_command_gotos(decoded_commands),
+        ),
         consumed_ids,
     )
+
+
+def detect_approval_rejection(
+    items: Sequence[Any],
+    pending: Sequence[Interrupt],
+) -> str | None:
+    """Return a human-readable message if the client rejected an interrupt.
+
+    Scans for :class:`MCPApprovalResponse` items whose
+    ``approval_request_id`` matches a pending interrupt and whose
+    ``approve`` is ``False``. The first match wins; subsequent rejections
+    are ignored.
+
+    The host's :meth:`handle_create` calls this *before* attempting to
+    resume so a rejection short-circuits the turn into
+    ``response.failed`` instead of being silently dropped.
+
+    Args:
+        items: Resolved input items from the request.
+        pending: Pending interrupts on the graph's checkpointed state.
+
+    Returns:
+        The rejection message (including the rejected interrupt id and
+        any client-supplied ``reason``), or ``None`` when no rejection
+        was found.
+    """
+    if not pending:
+        return None
+    pending_ids = {it.id for it in pending}
+    function_output_ids = {
+        item["call_id"]
+        for item in items
+        if _is_function_call_output(item)
+        and item["call_id"] in pending_ids
+        and _decode_command(item["output"]) is not None
+    }
+    for item in items:
+        if not _is_mcp_approval_response(item):
+            continue
+        if item["approve"]:
+            continue
+        approval_id = item["approval_request_id"]
+        interrupt_id = _interrupt_id_from_approval_id(approval_id, pending_ids)
+        if interrupt_id not in pending_ids:
+            continue
+        if interrupt_id in function_output_ids:
+            continue
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason:
+            return f"Interrupt '{approval_id}' was rejected by the client: {reason}"
+        return f"Interrupt '{approval_id}' was rejected by the client."
+    return None
 
 
 def _approval_id_suffix(interrupt_id: str) -> str:
@@ -399,8 +493,31 @@ def _interrupt_id_from_approval_id(
     return approval_id
 
 
+def _warn_if_competing_approval(items: Sequence[Any], call_id: str) -> None:
+    """Log a warning when both shapes target the same interrupt id.
+
+    Specifically: a request containing both a ``function_call_output``
+    and an ``mcp_approval_response`` for the same interrupt. Approval request
+    ids may carry the encoded ``mcpr_*`` wire form. The
+    ``function_call_output`` wins; this helper just surfaces the conflict so
+    clients learn the deterministic rule.
+    """
+    for item in items:
+        if (
+            _is_mcp_approval_response(item)
+            and _interrupt_id_from_approval_id(item["approval_request_id"], (call_id,))
+            == call_id
+        ):
+            logger.warning(
+                "Both function_call_output and mcp_approval_response target "
+                "interrupt id %r; function_call_output wins.",
+                call_id,
+            )
+            return
+
+
 def _decode_command(output: Any) -> tuple[Command, bool] | None:
-    """Decode a legacy function-call output into a LangGraph command."""
+    """Decode a ``function_call_output.output`` payload into a ``Command``."""
     if output is None:
         return None
     if isinstance(output, str):
@@ -410,14 +527,19 @@ def _decode_command(output: Any) -> tuple[Command, bool] | None:
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError:
+            # Plain string: behave like Command(resume=output).
             return Command(resume=output), True
         return _command_from_object(decoded, raw_string=output)
     if isinstance(output, list):
-        text = "".join(
+        # ``output`` can also be a list of content parts; flatten to text.
+        text_parts = [
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in output
-        )
-        return _decode_command(text) if text else None
+        ]
+        joined = "".join(p for p in text_parts if p)
+        if not joined:
+            return None
+        return _decode_command(joined)
     if isinstance(output, dict):
         return _command_from_object(output)
     return None
@@ -426,6 +548,7 @@ def _decode_command(output: Any) -> tuple[Command, bool] | None:
 def _command_from_object(
     obj: Any, *, raw_string: str | None = None
 ) -> tuple[Command, bool]:
+    """Build a :class:`Command` from a decoded JSON value."""
     if isinstance(obj, dict) and ("resume" in obj or "update" in obj or "goto" in obj):
         return (
             Command(
@@ -435,18 +558,27 @@ def _command_from_object(
             ),
             "resume" in obj,
         )
+    # JSON didn't look like a Command envelope — treat the whole value
+    # (or its original string) as the resume payload.
     return Command(resume=raw_string if raw_string is not None else obj), True
 
 
 def _merge_command_updates(commands: Sequence[Command]) -> Any | None:
+    """Preserve every state write carried by parallel resume commands."""
     updates = [command.update for command in commands if command.update is not None]
-    if len(updates) < 2:
-        return updates[0] if updates else None
+    if not updates:
+        return None
+    if len(updates) == 1:
+        return updates[0]
+
     merged: list[tuple[str, Any]] = []
     for update in updates:
         if isinstance(update, dict):
             merged.extend(update.items())
-        elif isinstance(update, (list, tuple)):
+        elif isinstance(update, (list, tuple)) and all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+            for item in update
+        ):
             merged.extend(update)
         else:
             merged.append(("__root__", update))
@@ -454,14 +586,20 @@ def _merge_command_updates(commands: Sequence[Command]) -> Any | None:
 
 
 def _merge_command_gotos(commands: Sequence[Command]) -> Any:
+    """Preserve every destination carried by parallel resume commands."""
     gotos = [command.goto for command in commands if command.goto]
-    if len(gotos) < 2:
-        return gotos[0] if gotos else ()
-    return tuple(
-        destination
-        for goto in gotos
-        for destination in (goto if isinstance(goto, (list, tuple)) else (goto,))
-    )
+    if not gotos:
+        return ()
+    if len(gotos) == 1:
+        return gotos[0]
+
+    merged: list[Any] = []
+    for goto in gotos:
+        if isinstance(goto, (list, tuple)):
+            merged.extend(goto)
+        else:
+            merged.append(goto)
+    return tuple(merged)
 
 
 async def emit_interrupts(
@@ -470,9 +608,18 @@ async def emit_interrupts(
 ) -> AsyncIterator[Any]:
     """Yield Responses API events that surface pending interrupts.
 
-    Each interrupt produces one ``mcp_approval_request`` item with a generated
-    ``mcpr_*`` id, :data:`HITL_MCP_SERVER_LABEL`, and the JSON envelope from
-    :func:`interrupt_arguments_json`.
+    Each interrupt produces *two* output items in the same response:
+
+    1. A ``function_call`` item (name :data:`HITL_FUNCTION_NAME`,
+       ``call_id`` = ``interrupt.id``, ``arguments`` = the JSON envelope
+       from :func:`interrupt_arguments_json`).
+     2. An ``mcp_approval_request`` item with a generated ``mcpr_*`` id,
+         ``server_label`` = :data:`HITL_MCP_SERVER_LABEL`, same ``name`` and
+         ``arguments``).
+
+    Both items carry the same ``interrupt.id`` so the inbound resume
+    matches the same logical pause regardless of which channel the
+    client chose.
 
     Args:
         interrupts: The interrupts to emit (typically from
@@ -487,6 +634,15 @@ async def emit_interrupts(
             continue
         arguments_json = interrupt_arguments_json(interrupt)
 
+        # Channel 1 — function_call.
+        fn = stream.add_output_item_function_call(HITL_FUNCTION_NAME, interrupt.id)
+        yield fn.emit_added()
+        if arguments_json:
+            yield fn.emit_arguments_delta(arguments_json)
+        yield fn.emit_arguments_done(arguments_json)
+        yield fn.emit_done()
+
+        # Channel 2 — mcp_approval_request with a storage-compatible id.
         approval_builder = stream.add_output_item_mcp_approval_request()
         approval_item = OutputItemMcpApprovalRequest(
             type="mcp_approval_request",
