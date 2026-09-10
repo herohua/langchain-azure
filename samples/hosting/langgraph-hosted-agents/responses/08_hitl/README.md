@@ -208,3 +208,6 @@ the README in the parent directory.
 
 The deployment descriptors declare Responses protocol `2.0.0`, which supplies
 the hosted request context required by `FoundryCheckpointSaver`.
+
+For LangChain's structured tool-review contract, see the separate
+[Human-in-the-loop middleware sample](../11_hitl_middleware/).

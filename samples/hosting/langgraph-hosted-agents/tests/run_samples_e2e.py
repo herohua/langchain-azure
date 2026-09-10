@@ -1044,7 +1044,10 @@ def check_06_pause_then_resume() -> None:
         err = secondb_payload.get("error") or {}
         _assert(
             err.get("code") == "interrupt_rejected",
-            f"error.code == interrupt_rejected (got {err.get('code')!r})",
+            (
+                "error.code == interrupt_rejected "
+                f"(got {err.get('code')!r})"
+            ),
         )
         _assert(
             approval_id_b in (err.get("message") or ""),
@@ -1115,6 +1118,115 @@ def check_06_pause_then_resume() -> None:
         _assert(
             "vancouver" in _response_text(secondc_payload).lower(),
             "Run C final text reflects the overridden location (Vancouver)",
+        )
+    finally:
+        server.terminate()
+
+
+def check_11_hitl_middleware() -> None:
+    """responses/11_hitl_middleware: mixed decisions use the rich channel."""
+    requires_foundry_endpoint()
+    server = start_sample("responses/11_hitl_middleware/main.py")
+    try:
+        conversation_id = f"e2e-hitl-middleware-{uuid.uuid4().hex[:8]}"
+        first = _post(
+            server,
+            "/responses",
+            json_body={
+                "input": (
+                    "Call get_weather and get_local_time for Seattle in parallel. "
+                    "Use both tools in the same response."
+                ),
+                "conversation": {"id": conversation_id},
+            },
+            timeout=180.0,
+        )
+        _assert(first.status_code == 200, f"turn 1 HTTP 200 (got {first.status_code})")
+        output = first.json()["output"]
+        interrupts = [
+            item
+            for item in output
+            if item.get("type") == "function_call"
+            and item.get("name") == "__hosted_agent_adapter_interrupt__"
+        ]
+        approvals = [item for item in output if item.get("type") == "mcp_approval_request"]
+        tool_call_ids = {
+            item["name"]: item["call_id"]
+            for item in output
+            if item.get("type") == "function_call"
+            and item.get("name") in {"get_weather", "get_local_time"}
+        }
+        _assert(len(interrupts) == 1, "one middleware interrupt is pending")
+        _assert(len(approvals) == 1, "one shortcut approval item is emitted")
+
+        interrupt_call = interrupts[0]
+        interrupt_value = json.loads(interrupt_call["arguments"])["value"]
+        actions = interrupt_value["action_requests"]
+        reviews = interrupt_value["review_configs"]
+        _assert(len(actions) == 2, "the interrupt batches two actions")
+        _assert(
+            {action["name"] for action in actions}
+            == {"get_weather", "get_local_time"},
+            "the batch contains both sample tools",
+        )
+        _assert(
+            [review["action_name"] for review in reviews]
+            == [action["name"] for action in actions],
+            "review configs match action count and order",
+        )
+
+        rejected = _post(
+            server,
+            "/responses",
+            json_body={
+                "conversation": {"id": conversation_id},
+                "input": [{
+                    "type": "mcp_approval_response",
+                    "approval_request_id": approvals[0]["id"],
+                    "approve": False,
+                    "reason": "Use the rich channel",
+                }],
+            },
+            timeout=120.0,
+        )
+        _assert(
+            rejected.json().get("error", {}).get("code") == "interrupt_rejected",
+            "shortcut rejection returns interrupt_rejected",
+        )
+
+        decisions = [
+            {"type": "approve"}
+            if action["name"] == "get_weather"
+            else {"type": "reject", "message": "Local time access denied"}
+            for action in actions
+        ]
+        resumed = _post(
+            server,
+            "/responses",
+            json_body={
+                "conversation": {"id": conversation_id},
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": interrupt_call["call_id"],
+                    "output": json.dumps({"resume": {"decisions": decisions}}),
+                }],
+            },
+            timeout=300.0,
+        )
+        payload = resumed.json()
+        tool_outputs = {
+            item["call_id"]: str(item["output"])
+            for item in payload["output"]
+            if item.get("type") == "function_call_output"
+        }
+        weather_output = tool_outputs.get(tool_call_ids["get_weather"], "")
+        time_output = tool_outputs.get(tool_call_ids["get_local_time"], "")
+        _assert(payload["status"] == "completed", "graph completes normally")
+        _assert("sunny" in weather_output.lower(), "approved weather tool executes")
+        _assert("09:30" not in time_output, "rejected time tool does not execute")
+        _assert(
+            "Local time access denied" in time_output,
+            "rejection reason reaches the rejected tool result",
         )
     finally:
         server.terminate()
@@ -1262,6 +1374,7 @@ def _build_registry() -> list[Check]:
         Check("responses/06_files", "files", check_06_files, check_06_files.__doc__ or ""),
         Check("responses/07_observability", "observability", check_07_observability, check_07_observability.__doc__ or ""),
         Check("responses/08_hitl", "pause_then_resume", check_06_pause_then_resume, check_06_pause_then_resume.__doc__ or ""),
+        Check("responses/11_hitl_middleware", "mixed_decisions", check_11_hitl_middleware, check_11_hitl_middleware.__doc__ or ""),
         Check("invocations/01_basic", "multi_turn", check_03_multi_turn, check_03_multi_turn.__doc__ or ""),
         Check("invocations/01_basic", "streaming", check_03_streaming, check_03_streaming.__doc__ or ""),
         Check("invocations/02_tools", "final_text", check_04_final_text, check_04_final_text.__doc__ or ""),

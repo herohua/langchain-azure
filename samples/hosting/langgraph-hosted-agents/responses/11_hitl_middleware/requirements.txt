@@ -1,0 +1,5 @@
+langchain-azure-ai[hosting]
+langchain
+langchain-openai
+python-dotenv
+httpx

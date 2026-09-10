@@ -258,13 +258,46 @@ class TestApprovalResumeChannel:
         assert command.resume == {"question": "Where?"}
         assert consumed == frozenset({"int-1"})
 
-    def test_approve_false_yields_no_command(self) -> None:
-        # Rejection is surfaced via ``detect_approval_rejection``, not here.
-        pending = pending_interrupt(id="int-1")
-        items = [_approval_response("int-1", False)]
+    def test_approve_true_does_not_infer_middleware_from_payload(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [
+                    {"name": "tool_a", "args": {}},
+                    {"name": "tool_b", "args": {}},
+                ],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["approve"]},
+                    {"action_name": "tool_b", "allowed_decisions": ["approve"]},
+                ],
+            },
+        )
+        command, consumed = parse_resume_command(
+            [_approval_response("int-1", True)],
+            (pending,),
+        )
+        assert command is not None
+        assert command.resume == pending.value
+        assert consumed == frozenset({"int-1"})
+
+    def test_approve_false_does_not_infer_middleware_from_payload(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [{"name": "delete_file", "args": {}}],
+                "review_configs": [
+                    {
+                        "action_name": "delete_file",
+                        "allowed_decisions": ["approve", "reject"],
+                    }
+                ],
+            },
+        )
+        items = [_approval_response("int-1", False, reason="Not authorized")]
         command, consumed = parse_resume_command(items, (pending,))
         assert command is None
         assert consumed == frozenset()
+        assert "Not authorized" in (detect_approval_rejection(items, (pending,)) or "")
 
     def test_function_call_output_wins_over_approval(self) -> None:
         pending = pending_interrupt(id="int-1", value="original")
@@ -276,6 +309,25 @@ class TestApprovalResumeChannel:
         assert command is not None
         # function_call_output (richer payload) wins over the approval echo.
         assert command.resume == "Seattle"
+        assert consumed == frozenset({"int-1"})
+
+    def test_function_call_output_wins_over_rejection(self) -> None:
+        pending = pending_interrupt(
+            id="int-1",
+            value={
+                "action_requests": [{"name": "tool_a", "args": {}}],
+                "review_configs": [
+                    {"action_name": "tool_a", "allowed_decisions": ["reject"]}
+                ],
+            },
+        )
+        items = [
+            _approval_response("int-1", False, reason="Denied"),
+            _tool_output("int-1", '{"resume": "override"}'),
+        ]
+        command, consumed = parse_resume_command(items, (pending,))
+        assert command is not None
+        assert command.resume == "override"
         assert consumed == frozenset({"int-1"})
 
     def test_approval_for_unknown_id_is_ignored(self) -> None:

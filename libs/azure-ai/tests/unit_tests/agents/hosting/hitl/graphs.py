@@ -17,7 +17,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any, ClassVar, Optional
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -82,6 +86,31 @@ class ScriptedModel:
         return queue.pop(0)
 
 
+class ScriptedToolCallingModel(BaseChatModel):
+    """Chat model that supports ``create_agent`` tool binding."""
+
+    key: str
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-tool-calling"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> ScriptedToolCallingModel:
+        del tools, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        message = ScriptedModel(self.key).invoke(messages)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
 def build_ask_human_graph(key: str) -> CompiledStateGraph:
     """Agent that pauses in a dedicated ``ask_human`` node.
 
@@ -124,6 +153,41 @@ def build_ask_human_graph(key: str) -> CompiledStateGraph:
     builder.add_edge("action", "agent")
     builder.add_edge("ask_human", "agent")
     return builder.compile(checkpointer=InMemorySaver())
+
+
+def build_hitl_middleware_graph(
+    key: str,
+    tool_calls: list[str],
+) -> CompiledStateGraph:
+    """Agent guarded by LangChain's HumanInTheLoopMiddleware."""
+
+    @tool
+    def approved_tool(value: str) -> str:
+        """Record an approved tool execution."""
+        tool_calls.append(f"approved:{value}")
+        return f"executed:{value}"
+
+    @tool
+    def rejected_tool(value: str) -> str:
+        """Record a tool execution that tests should reject."""
+        tool_calls.append(f"rejected:{value}")
+        return f"executed:{value}"
+
+    tools = [approved_tool, rejected_tool]
+
+    return create_agent(
+        model=ScriptedToolCallingModel(key=key),
+        tools=tools,
+        middleware=[
+            HumanInTheLoopMiddleware(
+                interrupt_on={
+                    tool.name: {"allowed_decisions": ["approve", "reject", "edit"]}
+                    for tool in tools
+                }
+            )
+        ],
+        checkpointer=InMemorySaver(),
+    )
 
 
 # ---------------------------------------------------------------------------

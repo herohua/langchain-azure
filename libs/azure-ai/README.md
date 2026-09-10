@@ -162,6 +162,10 @@ if __name__ == "__main__":
 
 `ResponsesHostServer` serves the OpenAI Responses-style `/responses` endpoint. `InvocationsHostServer` serves the generic `/invocations` endpoint for applications that want to define their own JSON request and response shape.
 
+For batched tool review using `HumanInTheLoopMiddleware`, including mixed
+approve and reject decisions through `function_call_output`, see the
+[HITL middleware sample](../../samples/hosting/langgraph-hosted-agents/responses/11_hitl_middleware/).
+
 Both hosts accept `ResponsesServerOptions`. For the Invocations host,
 `resilient_background=True` enables durable background turns and
 `steerable_conversations=True` lets a new turn supersede an active turn in the
@@ -199,6 +203,12 @@ sending a matching `function_call_output` or `mcp_approval_response` item as
 the next request's `message` list. Streaming requests emit these as
 `output_item` SSE events. Existing string `message` requests and responses
 without pending interrupts keep their original shape.
+
+For both hosts, the shortcut approval channel always treats `approve=true` as
+the original `interrupt.value` and `approve=false` as
+`interrupt_rejected`. LangChain `HumanInTheLoopMiddleware` decisions must
+use `function_call_output` with a `resume.decisions` entry for each action,
+in the original order.
 
 The Responses host uses one conversation-state source per graph. The policy depends on whether the hosted graph has a LangGraph checkpointer:
 

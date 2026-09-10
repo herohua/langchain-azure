@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("azure.ai.agentserver.responses")
 pytest.importorskip("starlette")
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from langchain_azure_ai.agents.hosting import ResponsesHostServer
 from langchain_azure_ai.agents.hosting._converters import (
@@ -40,6 +40,7 @@ from .conftest import (
 from .graphs import (
     ScriptedModel,
     build_ask_human_graph,
+    build_hitl_middleware_graph,
     build_simple_interrupt_graph,
 )
 
@@ -357,12 +358,10 @@ class TestMcpApprovalChannel:
             assert "lookup completed" in assistant_text(payload)
 
     @REAL_INTERRUPT_ASYNC_XFAIL
-    def test_reject_fails_the_turn(self, script: ScriptRegistrar) -> None:
-        """``mcp_approval_response{approve:false}`` short-circuits the turn into
-        ``response.failed(code='interrupt_rejected', …)``; the graph is NOT
-        driven on the rejection turn."""
+    def test_reject_keeps_interrupt_pending(self, script: ScriptRegistrar) -> None:
+        """A shortcut rejection fails without consuming the interrupt."""
         key = "hitl-reject"
-        remaining = script(
+        script(
             key,
             [
                 AIMessage(
@@ -371,13 +370,11 @@ class TestMcpApprovalChannel:
                         {
                             "id": "call_ask_reject",
                             "name": "AskHuman",
-                            "args": {"question": "Confirm: irreversible action?"},
+                            "args": {"question": "Confirm the action?"},
                         }
                     ],
                 ),
-                # MUST NOT be consumed — the host should not drive the graph on
-                # the rejection turn.
-                AIMessage(content="should not be reached"),
+                AIMessage(content="Resumed after the rejected shortcut."),
             ],
         )
         host = ResponsesHostServer(build_ask_human_graph(key))
@@ -385,17 +382,12 @@ class TestMcpApprovalChannel:
         with client_for(host) as client:
             first = client.post(
                 "/responses",
-                json={
-                    "input": "do something risky",
-                    "conversation": {"id": conversation_id},
-                },
+                json={"input": "do it", "conversation": {"id": conversation_id}},
             )
-            assert first.status_code == 200, first.text
-            approvals = approval_requests(first.json())
-            assert len(approvals) == 1
-            approval_id = approvals[0]["id"]
+            approval_id = approval_requests(first.json())[0]["id"]
+            call_id = sentinels(first.json())[0]["call_id"]
 
-            second = client.post(
+            rejected = client.post(
                 "/responses",
                 json={
                     "conversation": {"id": conversation_id},
@@ -409,19 +401,113 @@ class TestMcpApprovalChannel:
                     ],
                 },
             )
-            # The agentserver Responses lifecycle still returns 200 with
-            # a ``failed`` status payload (mirrors how other failures are
-            # surfaced).
-            assert second.status_code == 200, second.text
-            payload = second.json()
+            payload = rejected.json()
             assert payload["status"] == "failed", payload
-            err = payload.get("error") or {}
-            assert err.get("code") == "interrupt_rejected", payload
-            assert approval_id in (err.get("message") or "")
-            assert "user said no" in (err.get("message") or "")
-        # The second scripted AIMessage must remain un-consumed because
-        # the graph was not driven on the rejection turn.
-        assert len(remaining) == 1
+            assert payload["error"]["code"] == "interrupt_rejected"
+
+            resumed = client.post(
+                "/responses",
+                json={
+                    "conversation": {"id": conversation_id},
+                    "input": [resume_item(call_id, "approved later")],
+                },
+            )
+
+        assert resumed.json()["status"] == "completed"
+        assert "resumed after" in assistant_text(resumed.json()).lower()
+
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_rich_channel_supports_mixed_middleware_decisions(
+        self, script: ScriptRegistrar
+    ) -> None:
+        key = "hitl-middleware-mixed"
+        script(
+            key,
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_approved",
+                            "name": "approved_tool",
+                            "args": {"value": "A"},
+                        },
+                        {
+                            "id": "call_rejected",
+                            "name": "rejected_tool",
+                            "args": {"value": "B"},
+                        },
+                    ],
+                ),
+                AIMessage(content="Mixed review completed."),
+            ],
+        )
+        tool_calls: list[str] = []
+        host = ResponsesHostServer(build_hitl_middleware_graph(key, tool_calls))
+        conversation_id = "conv-middleware-mixed"
+        with client_for(host) as client:
+            first = client.post(
+                "/responses",
+                json={"input": "review both", "conversation": {"id": conversation_id}},
+            )
+            interrupt_calls = sentinels(first.json())
+            assert len(interrupt_calls) == 1
+            interrupt_value = json.loads(interrupt_calls[0]["arguments"])["value"]
+            assert [
+                action["name"] for action in interrupt_value["action_requests"]
+            ] == [
+                "approved_tool",
+                "rejected_tool",
+            ]
+            assert len(interrupt_value["review_configs"]) == 2
+            approval_id = approval_requests(first.json())[0]["id"]
+            call_id = interrupt_calls[0]["call_id"]
+            rejected = client.post(
+                "/responses",
+                json={
+                    "conversation": {"id": conversation_id},
+                    "input": [
+                        {
+                            "type": "mcp_approval_response",
+                            "approval_request_id": approval_id,
+                            "approve": False,
+                            "reason": "Use the rich channel",
+                        }
+                    ],
+                },
+            )
+            assert rejected.json()["error"]["code"] == "interrupt_rejected"
+            assert tool_calls == []
+
+            resumed = client.post(
+                "/responses",
+                json={
+                    "conversation": {"id": conversation_id},
+                    "input": [
+                        resume_item(
+                            call_id,
+                            {
+                                "decisions": [
+                                    {"type": "approve"},
+                                    {"type": "reject", "message": "Denied B"},
+                                ]
+                            },
+                        )
+                    ],
+                },
+            )
+
+        assert resumed.json()["status"] == "completed"
+        assert "Mixed review completed" in assistant_text(resumed.json())
+        assert tool_calls == ["approved:A"]
+        rejection_messages = [
+            message
+            for turn in ScriptedModel.seen[key]
+            for message in turn
+            if isinstance(message, ToolMessage) and message.status == "error"
+        ]
+        assert rejection_messages
+        assert all("Denied B" in str(message.content) for message in rejection_messages)
 
 
 class TestThreadScoping:
