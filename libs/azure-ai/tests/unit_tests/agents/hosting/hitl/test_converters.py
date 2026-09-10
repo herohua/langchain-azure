@@ -29,7 +29,6 @@ from langgraph.types import Command
 
 from langchain_azure_ai.agents.hosting._converters import (
     HITL_FUNCTION_NAME,
-    HITL_MCP_SERVER_LABEL,
     build_messages_input,
     detect_approval_rejection,
     detect_pending_interrupts,
@@ -245,47 +244,6 @@ class TestInterruptArgumentsJson:
         assert json.loads(out) == {"interrupt_id": "int-1", "value": "opaque-value"}
 
 
-class TestApprovalResumeChannel:
-    """The ``mcp_approval_response`` resume channel."""
-
-    def test_approve_true_echoes_interrupt_value(self) -> None:
-        pending = pending_interrupt(id="int-1", value={"question": "Where?"})
-        items = [_approval_response("int-1", True)]
-        command, consumed = parse_resume_command(items, (pending,))
-        assert command is not None
-        # approve=True echoes the original interrupt value back as the
-        # resume payload (matches Agent Framework's behavior).
-        assert command.resume == {"question": "Where?"}
-        assert consumed == frozenset({"int-1"})
-
-    def test_approve_false_yields_no_command(self) -> None:
-        # Rejection is surfaced via ``detect_approval_rejection``, not here.
-        pending = pending_interrupt(id="int-1")
-        items = [_approval_response("int-1", False)]
-        command, consumed = parse_resume_command(items, (pending,))
-        assert command is None
-        assert consumed == frozenset()
-
-    def test_function_call_output_wins_over_approval(self) -> None:
-        pending = pending_interrupt(id="int-1", value="original")
-        items = [
-            _tool_output("int-1", "Seattle"),
-            _approval_response("int-1", True),
-        ]
-        command, consumed = parse_resume_command(items, (pending,))
-        assert command is not None
-        # function_call_output (richer payload) wins over the approval echo.
-        assert command.resume == "Seattle"
-        assert consumed == frozenset({"int-1"})
-
-    def test_approval_for_unknown_id_is_ignored(self) -> None:
-        pending = pending_interrupt(id="int-1")
-        items = [_approval_response("other", True)]
-        command, consumed = parse_resume_command(items, (pending,))
-        assert command is None
-        assert consumed == frozenset()
-
-
 class TestParallelInterruptResumeMap:
     """Several pauses outstanding at once.
 
@@ -356,30 +314,6 @@ class TestParallelInterruptResumeMap:
         assert command.goto == ("route-a", "route-b")
         assert consumed == frozenset({"int-a", "int-b"})
 
-    def test_map_mixes_both_resume_channels(self) -> None:
-        pending = (
-            pending_interrupt(id="int-a"),
-            pending_interrupt(id="int-b", value="echo-me"),
-        )
-        items = [
-            _tool_output("int-a", "A"),
-            _approval_response("int-b", True),
-        ]
-        command, consumed = parse_resume_command(items, pending)
-        assert command is not None
-        assert command.resume == {"int-a": "A", "int-b": "echo-me"}
-        assert consumed == frozenset({"int-a", "int-b"})
-
-    def test_map_skips_rejected_approvals(self) -> None:
-        pending = (pending_interrupt(id="int-a"), pending_interrupt(id="int-b"))
-        items = [
-            _tool_output("int-a", "A"),
-            _approval_response("int-b", False),
-        ]
-        command, _ = parse_resume_command(items, pending)
-        assert command is not None
-        assert command.resume == {"int-a": "A"}
-
     def test_routes_by_id_not_by_position(self) -> None:
         # Clients are under no obligation to answer in emission order, and
         # nothing in the Responses API preserves it. Pairing items to pending
@@ -422,7 +356,7 @@ class TestApprovalIdRoundTrip:
     able to recover it.
     """
 
-    async def test_emit_interrupts_emits_paired_channels_per_interrupt(self) -> None:
+    async def test_ordinary_interrupt_emits_only_function_call(self) -> None:
         items = await emitted_items(
             (
                 pending_interrupt(id="int-a", value="a?"),
@@ -434,45 +368,7 @@ class TestApprovalIdRoundTrip:
 
         assert [it["call_id"] for it in function_calls] == ["int-a", "int-b"]
         assert all(it["name"] == HITL_FUNCTION_NAME for it in function_calls)
-        assert len(approvals) == 2
-        assert all(it["id"].startswith("mcpr_") for it in approvals)
-        assert all(it["server_label"] == HITL_MCP_SERVER_LABEL for it in approvals)
-        # The two channels carry the same envelope so a client may pick either.
-        assert [it["arguments"] for it in approvals] == [
-            it["arguments"] for it in function_calls
-        ]
-        # And each approval id must be distinct so partial answers stay routable.
-        assert approvals[0]["id"] != approvals[1]["id"]
-
-    async def test_parse_resume_command_accepts_emitted_approval_id(self) -> None:
-        pending = pending_interrupt(id="int-1", value="echo-me")
-        items = await emitted_items((pending,))
-        approval_id = next(
-            it["id"] for it in items if it["type"] == "mcp_approval_request"
-        )
-        assert approval_id != "int-1"  # encoded, not the raw interrupt id
-
-        command, consumed = parse_resume_command(
-            [_approval_response(approval_id, True)],
-            (pending,),
-        )
-        assert command is not None
-        assert command.resume == "echo-me"
-        assert consumed == frozenset({approval_id})
-
-    async def test_detect_approval_rejection_accepts_emitted_approval_id(self) -> None:
-        pending = pending_interrupt(id="int-1")
-        items = await emitted_items((pending,))
-        approval_id = next(
-            it["id"] for it in items if it["type"] == "mcp_approval_request"
-        )
-
-        message = detect_approval_rejection(
-            [_approval_response(approval_id, False)],
-            (pending,),
-        )
-        assert message is not None
-        assert approval_id in message
+        assert approvals == []
 
 
 class TestDetectApprovalRejection:

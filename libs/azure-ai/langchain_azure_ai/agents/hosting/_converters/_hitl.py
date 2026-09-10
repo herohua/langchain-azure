@@ -9,30 +9,10 @@ The pause is checkpointed and surfaced on
 invoking the graph again with a :class:`langgraph.types.Command` carrying
 ``resume`` / ``update`` / ``goto`` fields.
 
-We map this onto the OpenAI Responses API by emitting *two* output items
-per pending interrupt so off-the-shelf clients can drive resume through
-either of two standard channels:
-
-1. A ``function_call`` output item named
-   :data:`HITL_FUNCTION_NAME` with ``call_id == interrupt.id``. The
-   ``arguments`` field carries the ``{"interrupt_id", "value"}`` envelope
-   (JSON-encoded).
-2. An ``mcp_approval_request`` output item with a storage-compatible generated
-    ``mcpr_*`` id, ``server_label == "langgraph"``, the same ``name``, and the
-    same ``arguments`` envelope.
-
-Both items carry the same ``interrupt.id`` in their arguments. The client
-resumes by posting either:
-
-* a ``function_call_output`` input item (rich payload — can carry
-  ``{"resume"|"update"|"goto"}``), or
-* an ``mcp_approval_response`` input item (approve-only — ``approve=true``
-  resumes with the original interrupt value echoed back; ``approve=false``
-  is surfaced to the host as a rejection signal).
-
-When both shapes target the same ``interrupt.id`` in one request,
-``function_call_output`` wins (it carries the richer payload) and a
-warning is logged.
+Ordinary interrupts use a reserved ``function_call`` /
+``function_call_output`` pair. Interrupts explicitly produced by the MCP
+approval node preserve the OpenAI ``mcp_approval_request`` /
+``mcp_approval_response`` protocol.
 """
 
 from __future__ import annotations
@@ -89,8 +69,29 @@ def _is_mcp_approval_response(item: Any) -> TypeGuard[MCPApprovalResponse]:
         isinstance(item, dict)
         and item.get("type") == "mcp_approval_response"
         and isinstance(item.get("approval_request_id"), str)
+        and bool(item["approval_request_id"])
         and isinstance(item.get("approve"), bool)
     )
+
+
+def _mcp_approval_requests(interrupt: Interrupt) -> tuple[dict[str, str], ...]:
+    """Return explicitly typed MCP approval requests from an interrupt."""
+    value = interrupt.value
+    if not isinstance(value, list) or not value:
+        return ()
+    requests: list[dict[str, str]] = []
+    for request in value:
+        if (
+            not isinstance(request, dict)
+            or request.get("type") != "mcp_approval_request"
+            or not all(
+                isinstance(request.get(field), str) and request[field]
+                for field in ("id", "server_label", "tool_name", "arguments")
+            )
+        ):
+            return ()
+        requests.append(request)
+    return tuple(requests)
 
 
 HITL_MCP_SERVER_LABEL: Final[str] = "langgraph"
@@ -238,26 +239,30 @@ def interrupt_output_items(
     for interrupt in interrupts:
         if not isinstance(interrupt, Interrupt):
             continue
-        suffix = _approval_id_suffix(interrupt.id)
-        arguments = interrupt_arguments_json(interrupt)
-        output.extend(
-            [
-                {
-                    "type": "function_call",
-                    "id": f"fc_{suffix}",
-                    "call_id": interrupt.id,
-                    "name": HITL_FUNCTION_NAME,
-                    "arguments": arguments,
-                    "status": "completed",
-                },
+        mcp_requests = _mcp_approval_requests(interrupt)
+        if mcp_requests:
+            output.extend(
                 {
                     "type": "mcp_approval_request",
-                    "id": f"mcpr_{suffix}",
-                    "server_label": HITL_MCP_SERVER_LABEL,
-                    "name": HITL_FUNCTION_NAME,
-                    "arguments": arguments,
-                },
-            ]
+                    "id": request["id"],
+                    "server_label": request["server_label"],
+                    "name": request["tool_name"],
+                    "arguments": request["arguments"],
+                }
+                for request in mcp_requests
+            )
+            continue
+        suffix = _approval_id_suffix(interrupt.id)
+        arguments = interrupt_arguments_json(interrupt)
+        output.append(
+            {
+                "type": "function_call",
+                "id": f"fc_{suffix}",
+                "call_id": interrupt.id,
+                "name": HITL_FUNCTION_NAME,
+                "arguments": arguments,
+                "status": "completed",
+            }
         )
     return output
 
@@ -343,10 +348,55 @@ def parse_resume_command(
         A ``(command, consumed_call_ids)`` pair. ``command`` is ``None``
         when no matching resume item was found.
     """
+    approval_responses: list[MCPApprovalResponse] = []
+    approval_ids: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("type") != "mcp_approval_response":
+            continue
+        if not _is_mcp_approval_response(item):
+            raise ValueError(
+                f"mcp_approval_response item {index} requires a non-empty string "
+                "approval_request_id and boolean approve."
+            )
+        if item.get("reason") is not None and not isinstance(item["reason"], str):
+            raise ValueError(
+                f"mcp_approval_response item {index} reason must be a string."
+            )
+        approval_id = item["approval_request_id"]
+        if approval_id in approval_ids:
+            raise ValueError(
+                f"MCP approval request id '{approval_id}' was submitted more than once."
+            )
+        approval_ids.add(approval_id)
+        approval_responses.append(item)
+
     if not pending:
+        if approval_responses:
+            raise ValueError(
+                f"MCP approval request id "
+                f"'{approval_responses[0]['approval_request_id']}' is not pending."
+            )
         return None, frozenset()
+    if approval_responses and any(
+        not _is_function_call_output(item)
+        and not (isinstance(item, dict) and item.get("type") == "mcp_approval_response")
+        for item in items
+    ):
+        raise ValueError(
+            "MCP approval responses cannot be submitted with other input."
+        )
 
     pending_by_id: dict[str, Interrupt] = {it.id: it for it in pending}
+    mcp_by_approval_id: dict[str, Interrupt] = {}
+    for interrupt in pending:
+        for request in _mcp_approval_requests(interrupt):
+            approval_id = request["id"]
+            if approval_id in mcp_by_approval_id:
+                raise ValueError(
+                    f"MCP approval request id '{approval_id}' matches multiple "
+                    "pending interrupts."
+                )
+            mcp_by_approval_id[approval_id] = interrupt
     # interrupt id -> (decoded command, explicitly carries resume), in
     # first-seen order. ``Command.resume is None`` alone cannot distinguish
     # an omitted resume from an explicit ``{"resume": null}``.
@@ -360,7 +410,11 @@ def parse_resume_command(
         if not _is_function_call_output(item):
             continue
         call_id = item["call_id"]
-        if call_id not in pending_by_id or call_id in commands:
+        if (
+            call_id not in pending_by_id
+            or _mcp_approval_requests(pending_by_id[call_id])
+            or call_id in commands
+        ):
             continue
         decoded = _decode_command(item["output"])
         if decoded is None:
@@ -371,19 +425,20 @@ def parse_resume_command(
         consumed[call_id] = call_id
 
     # Pass 2 — fall back to mcp_approval_response (approve-only).
-    for item in items:
-        if not _is_mcp_approval_response(item):
-            continue
+    for item in approval_responses:
         approval_id = item["approval_request_id"]
-        interrupt_id = _interrupt_id_from_approval_id(approval_id, pending_by_id)
-        interrupt_obj = pending_by_id.get(interrupt_id)
-        if interrupt_obj is None or interrupt_id in commands:
-            continue
-        if not item["approve"]:
-            # Rejection is surfaced via ``detect_approval_rejection``
-            # rather than as a ``Command``. Skip it here.
-            continue
-        commands[interrupt_id] = (Command(resume=interrupt_obj.value), True)
+        interrupt_obj = mcp_by_approval_id.get(approval_id)
+        if interrupt_obj is None:
+            raise ValueError(f"MCP approval request id '{approval_id}' is not pending.")
+        interrupt_id = interrupt_obj.id
+        if interrupt_id in commands:
+            raise ValueError(
+                f"MCP approval request id '{approval_id}' was submitted more than once."
+            )
+        resume = {"approve": item["approve"]}
+        if isinstance(item.get("reason"), str):
+            resume["reason"] = item["reason"]
+        commands[interrupt_id] = (Command(resume=resume), True)
         consumed[interrupt_id] = approval_id
 
     if not commands:
@@ -608,18 +663,8 @@ async def emit_interrupts(
 ) -> AsyncIterator[Any]:
     """Yield Responses API events that surface pending interrupts.
 
-    Each interrupt produces *two* output items in the same response:
-
-    1. A ``function_call`` item (name :data:`HITL_FUNCTION_NAME`,
-       ``call_id`` = ``interrupt.id``, ``arguments`` = the JSON envelope
-       from :func:`interrupt_arguments_json`).
-     2. An ``mcp_approval_request`` item with a generated ``mcpr_*`` id,
-         ``server_label`` = :data:`HITL_MCP_SERVER_LABEL`, same ``name`` and
-         ``arguments``).
-
-    Both items carry the same ``interrupt.id`` so the inbound resume
-    matches the same logical pause regardless of which channel the
-    client chose.
+    Ordinary interrupts produce a reserved ``function_call``. Explicit MCP
+    approval interrupts preserve their original ``mcp_approval_request``.
 
     Args:
         interrupts: The interrupts to emit (typically from
@@ -632,6 +677,20 @@ async def emit_interrupts(
     for interrupt in interrupts:
         if not isinstance(interrupt, Interrupt):
             continue
+        mcp_requests = _mcp_approval_requests(interrupt)
+        if mcp_requests:
+            for request in mcp_requests:
+                approval_builder = stream.add_output_item_mcp_approval_request()
+                approval_item = OutputItemMcpApprovalRequest(
+                    type="mcp_approval_request",
+                    id=request["id"],
+                    server_label=request["server_label"],
+                    name=request["tool_name"],
+                    arguments=request["arguments"],
+                )
+                yield approval_builder.emit_added(approval_item)
+                yield approval_builder.emit_done(approval_item)
+            continue
         arguments_json = interrupt_arguments_json(interrupt)
 
         # Channel 1 — function_call.
@@ -641,15 +700,3 @@ async def emit_interrupts(
             yield fn.emit_arguments_delta(arguments_json)
         yield fn.emit_arguments_done(arguments_json)
         yield fn.emit_done()
-
-        # Channel 2 — mcp_approval_request with a storage-compatible id.
-        approval_builder = stream.add_output_item_mcp_approval_request()
-        approval_item = OutputItemMcpApprovalRequest(
-            type="mcp_approval_request",
-            id=_approval_request_id(approval_builder.item_id, interrupt.id),
-            server_label=HITL_MCP_SERVER_LABEL,
-            name=HITL_FUNCTION_NAME,
-            arguments=arguments_json,
-        )
-        yield approval_builder.emit_added(approval_item)
-        yield approval_builder.emit_done(approval_item)

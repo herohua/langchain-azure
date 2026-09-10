@@ -449,7 +449,12 @@ class StreamConverter:
     async def _emit_tool_call(self, call: Any) -> AsyncIterator[Any]:
         name = str(call.get("name") or "")
         call_id = str(call.get("id") or call.get("call_id") or "")
-        if not name or not call_id or call_id in self._emitted_tool_call_ids:
+        if (
+            not name
+            or name == "mcp_approval_request"
+            or not call_id
+            or call_id in self._emitted_tool_call_ids
+        ):
             return
         async for event in self._close_open_reasoning():
             yield event

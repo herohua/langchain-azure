@@ -209,8 +209,7 @@ class TestParallelInterrupts:
             assert len(set(call_ids.values())) == 2
 
             approvals = approval_requests(first_payload)
-            assert len(approvals) == 2, first_payload
-            assert len({it["id"] for it in approvals}) == 2
+            assert approvals == [], first_payload
 
             second = client.post(
                 "/responses",
@@ -656,10 +655,8 @@ class TestComplexInterruptValues:
             value = interrupt_value(pending[0])
             assert isinstance(value, str), first_payload
             assert "pick one" in value, first_payload
-            # Both channels still agree so either can be used to resume.
             approvals = approval_requests(first_payload)
-            assert len(approvals) == 1, first_payload
-            assert approvals[0]["arguments"] == pending[0]["arguments"]
+            assert approvals == [], first_payload
 
             second = client.post(
                 "/responses",

@@ -22,7 +22,6 @@ from langchain_core.messages import AIMessage
 from langchain_azure_ai.agents.hosting import ResponsesHostServer
 from langchain_azure_ai.agents.hosting._converters import (
     HITL_FUNCTION_NAME,
-    HITL_MCP_SERVER_LABEL,
 )
 
 from .conftest import (
@@ -40,15 +39,16 @@ from .conftest import (
 from .graphs import (
     ScriptedModel,
     build_ask_human_graph,
+    build_mcp_approval_interrupt_graph,
     build_simple_interrupt_graph,
 )
 
 
 class TestInterruptEmission:
-    """A pause must surface as a resumable pair of output items."""
+    """An ordinary pause uses the function-call resume channel."""
 
     @REAL_INTERRUPT_ASYNC_XFAIL
-    def test_emits_both_channels_and_resumes(self, script: ScriptRegistrar) -> None:
+    def test_emits_function_call_and_resumes(self, script: ScriptRegistrar) -> None:
         key = "hitl-test"
         script(
             key,
@@ -92,14 +92,8 @@ class TestInterruptEmission:
             assert call_id  # LangGraph interrupt id
             assert envelope["interrupt_id"] == call_id
 
-            # The host should ALSO have emitted a paired mcp_approval_request
-            # item with a storage-compatible id and the same arguments envelope.
             approvals = approval_requests(first_payload)
-            assert len(approvals) == 1, first_payload
-            assert approvals[0]["id"].startswith("mcpr_")
-            assert approvals[0]["server_label"] == HITL_MCP_SERVER_LABEL
-            assert approvals[0]["arguments"] == interrupts[0]["arguments"]
-            assert json.loads(approvals[0]["arguments"])["interrupt_id"] == call_id
+            assert approvals == [], first_payload
 
             # 2. Resume turn — submit a function_call_output keyed by the
             #    interrupt id. The host should resume the graph and return
@@ -276,18 +270,11 @@ class TestResumeCallIdMismatch:
             assert second.status_code == 200, second.text
             payload = second.json()
             assert payload["status"] == "completed"
-            # Host re-emits the SAME pending sentinel (both channels) so
-            # the client can retry with the correct call_id.
+            # Host re-emits the same pending sentinel.
             reemitted = sentinels(payload)
             assert len(reemitted) == 1
             assert reemitted[0]["call_id"] == sentinel_call_id
-            approvals = approval_requests(payload)
-            assert len(approvals) == 1
-            assert approvals[0]["id"].startswith("mcpr_")
-            assert (
-                json.loads(approvals[0]["arguments"])["interrupt_id"]
-                == sentinel_call_id
-            )
+            assert approval_requests(payload) == []
             # And no spurious assistant message from a second LLM call.
             assert not [it for it in payload["output"] if it.get("type") == "message"]
         # The second scripted AIMessage must remain un-consumed because
@@ -296,31 +283,11 @@ class TestResumeCallIdMismatch:
 
 
 class TestMcpApprovalChannel:
-    """Resuming (or failing) a turn via ``mcp_approval_response``."""
+    """Resuming an explicitly typed MCP approval interrupt."""
 
     @REAL_INTERRUPT_ASYNC_XFAIL
-    def test_approve_resumes_the_graph(self, script: ScriptRegistrar) -> None:
-        """Client resumes a paused graph via ``mcp_approval_response{approve:true}``;
-        the host should drive the graph with ``Command(resume=interrupt.value)``
-        (echoing the original interrupt value back, per design)."""
-        key = "hitl-approve"
-        script(
-            key,
-            [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "call_ask_approve",
-                            "name": "AskHuman",
-                            "args": {"question": "Confirm: run weather lookup?"},
-                        }
-                    ],
-                ),
-                AIMessage(content="OK, lookup completed."),
-            ],
-        )
-        host = ResponsesHostServer(build_ask_human_graph(key))
+    def test_approve_resumes_the_graph(self) -> None:
+        host = ResponsesHostServer(build_mcp_approval_interrupt_graph())
         conversation_id = "conv-approve"
         with client_for(host) as client:
             first = client.post(
@@ -354,33 +321,11 @@ class TestMcpApprovalChannel:
             # No new pending interrupt this time.
             assert not sentinels(payload), payload
             assert not approval_requests(payload), payload
-            assert "lookup completed" in assistant_text(payload)
+            assert "'approve': True" in assistant_text(payload)
 
     @REAL_INTERRUPT_ASYNC_XFAIL
-    def test_reject_fails_the_turn(self, script: ScriptRegistrar) -> None:
-        """``mcp_approval_response{approve:false}`` short-circuits the turn into
-        ``response.failed(code='interrupt_rejected', …)``; the graph is NOT
-        driven on the rejection turn."""
-        key = "hitl-reject"
-        remaining = script(
-            key,
-            [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "call_ask_reject",
-                            "name": "AskHuman",
-                            "args": {"question": "Confirm: irreversible action?"},
-                        }
-                    ],
-                ),
-                # MUST NOT be consumed — the host should not drive the graph on
-                # the rejection turn.
-                AIMessage(content="should not be reached"),
-            ],
-        )
-        host = ResponsesHostServer(build_ask_human_graph(key))
+    def test_reject_resumes_the_graph(self) -> None:
+        host = ResponsesHostServer(build_mcp_approval_interrupt_graph())
         conversation_id = "conv-reject"
         with client_for(host) as client:
             first = client.post(
@@ -409,19 +354,11 @@ class TestMcpApprovalChannel:
                     ],
                 },
             )
-            # The agentserver Responses lifecycle still returns 200 with
-            # a ``failed`` status payload (mirrors how other failures are
-            # surfaced).
             assert second.status_code == 200, second.text
             payload = second.json()
-            assert payload["status"] == "failed", payload
-            err = payload.get("error") or {}
-            assert err.get("code") == "interrupt_rejected", payload
-            assert approval_id in (err.get("message") or "")
-            assert "user said no" in (err.get("message") or "")
-        # The second scripted AIMessage must remain un-consumed because
-        # the graph was not driven on the rejection turn.
-        assert len(remaining) == 1
+            assert payload["status"] == "completed", payload
+            assert "'approve': False" in assistant_text(payload)
+            assert "user said no" in assistant_text(payload)
 
 
 class TestThreadScoping:
@@ -488,7 +425,7 @@ class TestStreaming:
     """
 
     @REAL_INTERRUPT_ASYNC_XFAIL
-    def test_streams_both_interrupt_channels_and_resumes(self) -> None:
+    def test_streams_function_call_and_resumes(self) -> None:
         """Streaming clients must see the same two channels, and be able to
         resume over the streaming endpoint too.
 
@@ -510,9 +447,9 @@ class TestStreaming:
             assert first.status_code == 200, first.text
             items = hitl_items_in(sse_payloads(first.text))
             assert items, first.text
-            assert {"function_call", "mcp_approval_request"} <= {
-                item["type"] for item in items
-            }, first.text
+            assert not [
+                item for item in items if item["type"] == "mcp_approval_request"
+            ]
             call_ids = {
                 item["call_id"] for item in items if item["type"] == "function_call"
             }

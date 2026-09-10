@@ -117,12 +117,11 @@ def sentinels(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def approval_requests(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the ``mcp_approval_request`` HITL sentinels in a payload."""
+    """Return MCP approval requests in a response payload."""
     return [
         item
         for item in payload["output"]
         if item.get("type") == "mcp_approval_request"
-        and item.get("name") == HITL_FUNCTION_NAME
     ]
 
 

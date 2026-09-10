@@ -110,7 +110,7 @@ async def _emit_function_call(
     args = call.get("args")
     arguments_json = args if isinstance(args, str) else json.dumps(args or {})
 
-    if not name or not call_id:
+    if not name or name == "mcp_approval_request" or not call_id:
         return
 
     fn = stream.add_output_item_function_call(name, call_id)

@@ -554,14 +554,9 @@ class ResponsesHostServer:
     ) -> tuple[Optional["Command"], frozenset[str]]:
         """Build a resume :class:`Command` from the request's input items.
 
-        Default implementation scans the current request for either a
-        ``function_call_output`` whose ``call_id`` matches one of the
-        pending interrupts, or an ``mcp_approval_response`` whose
-        ``approval_request_id`` matches. The former decodes its
-        ``output`` JSON into a :class:`Command`; the latter resumes with
-        the interrupt's own value when ``approve=True``. Rejections
-        (``approve=False``) are surfaced via :meth:`detect_rejection`
-        instead. Override to plug in custom resume protocols.
+        Ordinary interrupts accept matching ``function_call_output`` items.
+        Explicit MCP approval interrupts accept ``mcp_approval_response``
+        items and preserve ``approve`` plus optional ``reason``.
 
         Args:
             request: The parsed create-response request.
@@ -585,12 +580,11 @@ class ResponsesHostServer:
     ) -> Optional[str]:
         """Detect a client-issued rejection of a pending interrupt.
 
-        Default implementation scans the request for an
+        Compatibility hook that scans the request for an
         ``mcp_approval_response`` item whose ``approval_request_id``
         matches a pending interrupt and whose ``approve`` is ``False``.
-        When found, :meth:`handle_create` short-circuits the turn into
-        ``response.failed(code="interrupt_rejected", …)`` instead of
-        driving the graph.
+        The default handler no longer calls this hook; MCP rejections resume
+        the graph through :meth:`build_resume_command`.
 
         Override to plug in custom rejection protocols (e.g. recognising
         a sentinel ``function_call_output`` payload as a rejection).
@@ -906,22 +900,15 @@ class ResponsesHostServer:
                 pending = await detect_pending_interrupts(self._graph, config)
                 if pending:
                     _add_request_hosting_features(HostingFeature.HITL)
-                    # HITL:
-                    # Rejection short-circuits the turn into ``response.failed``
-                    # so a client-issued ``mcp_approval_response{approve:false}``
-                    # is not silently dropped.
-                    rejection_message = await self.detect_rejection(
-                        request, context, pending
-                    )
-                    if rejection_message is not None:
-                        yield stream.emit_failed(
-                            code="interrupt_rejected",
-                            message=rejection_message,
-                        )
-                        return
+                try:
                     resume_command, consumed_call_ids = await self.build_resume_command(
                         request, context, pending
                     )
+                except ValueError as exc:
+                    yield stream.emit_failed(
+                        code="invalid_hitl_input", message=str(exc)
+                    )
+                    return
 
                 if pending and resume_command is None:
                     # Graph is paused but the client did not supply a matching

@@ -2,22 +2,10 @@
 
 This sample demonstrates an **approval-style HITL** flow using LangGraph's
 ``langgraph.types.interrupt``: before any tool runs, the graph pauses and
-asks the client to approve the proposed tool call. The pause is
-serialized to the wire as the **standard OpenAI ``mcp_approval_request``
-output item**, so any Responses-API client that already supports MCP
-server approvals can drive this agent without code changes.
-
-For each pending interrupt the host emits TWO paired output items in
-the same response, both keyed by the same LangGraph interrupt id:
-
-* an ``mcp_approval_request`` item (``server_label == "langgraph"``,
-  ``arguments`` JSON contains the proposed tool call) — the
-  OpenAI-standard channel; clients respond with an
-  ``mcp_approval_response``, and
-* a ``function_call`` item with
-  ``name == "__hosted_agent_adapter_interrupt__"`` — a parallel rich
-  channel for callers that want to send arbitrary resume payloads
-  (``{"resume", "update", "goto"}``) via ``function_call_output``.
+asks the client to approve the proposed tool call. This ordinary interrupt is
+serialized as a ``function_call`` and resumed with
+``function_call_output``. MCP approvals use their separate OpenAI
+``mcp_approval_request`` / ``mcp_approval_response`` protocol.
 
 State is persisted by a checkpointer keyed by the ``conversation`` id, so the
 second request continues the paused run. Local runs use ``InMemorySaver``;
@@ -40,26 +28,12 @@ tool::
 
     curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"input":"What is the weather in Seattle?","conversation":{"id":"demo-hitl-1"}}'
 
-The response ``output`` will contain an ``mcp_approval_request`` whose
-``arguments`` JSON describes the proposed tool call::
+The response ``output`` contains a reserved ``function_call`` whose
+``arguments`` describe the proposed tool call::
 
     {"interrupt_id": "<id>", "value": {"tool": "get_weather", "arguments": {"location": "Seattle"}}}
 
-**Primary path — approve via the standard MCP-approval channel.** The
-host resumes the graph and executes the tool::
-
-    curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"mcp_approval_response","approval_request_id":"<id>","approve":true}]}'
-
-**Reject.** The turn ends with ``response.failed``
-``code="interrupt_rejected"``; the pending interrupt remains in the
-checkpoint so the client can retry::
-
-    curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"mcp_approval_response","approval_request_id":"<id>","approve":false,"reason":"user canceled"}]}'
-
-**Advanced — rich resume via ``function_call_output``.** When you need
-to inject a custom resume value or drive a LangGraph ``Command`` with
-``update``/``goto`` fields, target the paired ``function_call`` item
-instead (its ``call_id`` is the same interrupt id)::
+Resume it through ``function_call_output``, targeting its ``call_id``::
 
     curl -X POST http://127.0.0.1:8088/responses -H 'Content-Type: application/json' -d '{"conversation":{"id":"demo-hitl-1"},"input":[{"type":"function_call_output","call_id":"<id>","output":"{\\"resume\\": {\\"tool\\":\\"get_weather\\",\\"arguments\\":{\\"location\\":\\"Vancouver\\"}}}"}]}'
 """
@@ -156,10 +130,7 @@ def _build_graph(checkpointer: BaseCheckpointSaver[Any]) -> "object":
             "arguments": tool_call["args"],
         }
 
-        # On approve=True, the resume value is the original ``proposed``
-        # dict. On a ``function_call_output``-style resume the client can
-        # send a different payload (e.g. to override the arguments) — we
-        # use whatever the client returned for the actual invocation.
+        # Use the client-supplied resume payload when it overrides the proposal.
         approved: Any = interrupt(proposed)
         if not isinstance(approved, dict) or "tool" not in approved:
             approved = proposed

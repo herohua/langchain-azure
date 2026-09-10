@@ -29,7 +29,7 @@ from azure.ai.agentserver.responses.models import (
 )
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.types import Command, Interrupt
+from langgraph.types import Command
 from starlette.testclient import TestClient
 
 from langchain_azure_ai.agents.hosting import (
@@ -57,6 +57,7 @@ from .conftest import (  # noqa: E402
     make_echo_graph,
     make_recovery_probe_graph,
     make_streaming_graph,
+    mcp_approval_interrupt,
 )
 
 
@@ -687,7 +688,7 @@ async def test_recovery_replays_hitl_approval_without_current_response_checkpoin
         checkpoint_id="checkpoint-parent",
     )
     captured: dict[str, Any] = {}
-    pending = Interrupt(value="Approve recovered action?", id="interrupt-1")
+    pending = mcp_approval_interrupt()
     server = ResponsesHostServer(make_recovery_probe_graph(captured, pending))
     context = _context(conversation_id=None, conversation_chain_id="chain-1")
     context.is_recovery = True
@@ -695,7 +696,7 @@ async def test_recovery_replays_hitl_approval_without_current_response_checkpoin
     context.get_input_items.return_value = [
         {
             "type": "mcp_approval_response",
-            "approval_request_id": pending.id,
+            "approval_request_id": "approval-1",
             "approve": True,
         }
     ]
@@ -708,7 +709,7 @@ async def test_recovery_replays_hitl_approval_without_current_response_checkpoin
     )
 
     assert isinstance(graph_input, Command)
-    assert graph_input.resume == pending.value
+    assert graph_input.resume == {"approve": True}
     assert captured["state_config"]["configurable"]["checkpoint_id"] == (
         "checkpoint-parent"
     )
@@ -725,7 +726,7 @@ async def test_recovery_replays_hitl_rejection_without_current_response_checkpoi
         checkpoint_id="checkpoint-parent",
     )
     captured: dict[str, Any] = {}
-    pending = Interrupt(value="Approve recovered action?", id="interrupt-1")
+    pending = mcp_approval_interrupt()
     server = ResponsesHostServer(make_recovery_probe_graph(captured, pending))
     context = _context(conversation_id=None, conversation_chain_id="chain-1")
     context.is_recovery = True
@@ -733,7 +734,7 @@ async def test_recovery_replays_hitl_rejection_without_current_response_checkpoi
     context.get_input_items.return_value = [
         {
             "type": "mcp_approval_response",
-            "approval_request_id": pending.id,
+            "approval_request_id": "approval-1",
             "approve": False,
         }
     ]
@@ -747,12 +748,11 @@ async def test_recovery_replays_hitl_rejection_without_current_response_checkpoi
         )
     ]
 
-    assert "input" not in captured
+    assert captured["input"].resume == {"approve": False}
     assert captured["state_config"]["configurable"]["checkpoint_id"] == (
         "checkpoint-parent"
     )
-    failed = next(event for event in events if event.get("type") == "response.failed")
-    assert failed["response"]["error"]["code"] == "interrupt_rejected"
+    assert any(event.get("type") == "response.completed" for event in events)
 
 
 @pytest.mark.parametrize(

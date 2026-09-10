@@ -59,9 +59,11 @@ from .conftest import (  # noqa: E402
     make_recovery_probe_graph,
     make_shutdown_checkpoint_graph,
     make_streaming_graph,
+    mcp_approval_interrupt,
 )
 from .hitl.conftest import REAL_INTERRUPT_ASYNC_XFAIL  # noqa: E402
 from .hitl.graphs import (  # noqa: E402
+    build_mcp_approval_interrupt_graph,
     build_parallel_empty_update_interrupt_graph,
     build_parallel_interrupt_graph,
     build_simple_interrupt_graph,
@@ -281,7 +283,7 @@ def test_invocation_emits_and_resumes_structured_hitl_items() -> None:
 
 @REAL_INTERRUPT_ASYNC_XFAIL
 def test_invocation_accepts_mcp_approval_response() -> None:
-    server = InvocationsHostServer(build_simple_interrupt_graph())
+    server = InvocationsHostServer(build_mcp_approval_interrupt_graph())
     session_id = "invocations-mcp-approval"
 
     with _client(server) as client:
@@ -294,7 +296,7 @@ def test_invocation_accepts_mcp_approval_response() -> None:
             for item in first.json()["output"]
             if item.get("type") == "mcp_approval_request"
         )
-        assert approval["id"].startswith("mcpr_")
+        assert approval["id"] == "approval-1"
 
         second = client.post(
             f"/invocations?agent_session_id={session_id}",
@@ -310,7 +312,7 @@ def test_invocation_accepts_mcp_approval_response() -> None:
         )
 
     assert second.status_code == 200, second.text
-    assert second.json() == {"response": "ok:name?"}
+    assert second.json() == {"response": "ok:{'approve': True}"}
 
 
 @pytest.mark.parametrize(
@@ -364,7 +366,7 @@ def test_partial_parallel_resume_emits_only_active_interrupts(
     [None, ResponsesServerOptions(steerable_conversations=True)],
 )
 @REAL_INTERRUPT_ASYNC_XFAIL
-def test_parallel_rejection_blocks_other_resume(
+def test_parallel_ordinary_interrupts_have_no_mcp_approval(
     options: ResponsesServerOptions | None,
 ) -> None:
     server = InvocationsHostServer(build_parallel_interrupt_graph(), options=options)
@@ -381,33 +383,14 @@ def test_parallel_rejection_blocks_other_resume(
             for item in first.json()["output"]
             if item.get("type") == "function_call"
         }
-        approvals = {
-            json.loads(item["arguments"])["value"]: item["id"]
+        approvals = [
+            item
             for item in first.json()["output"]
             if item.get("type") == "mcp_approval_request"
-        }
+        ]
 
-        second = client.post(
-            f"/invocations?agent_session_id={session_id}",
-            json={
-                "message": [
-                    {
-                        "type": "function_call_output",
-                        "call_id": function_calls["question_a"],
-                        "output": json.dumps({"resume": "A"}),
-                    },
-                    {
-                        "type": "mcp_approval_response",
-                        "approval_request_id": approvals["question_b"],
-                        "approve": False,
-                        "reason": "Not authorized",
-                    },
-                ]
-            },
-        )
-
-    assert second.status_code == 409, second.text
-    assert "Not authorized" in second.json()["error"]
+    assert set(function_calls) == {"question_a", "question_b"}
+    assert approvals == []
 
 
 @REAL_INTERRUPT_ASYNC_XFAIL
@@ -537,9 +520,9 @@ def test_task_backed_foreground_invocation_preserves_hitl_output() -> None:
 
 
 @REAL_INTERRUPT_ASYNC_XFAIL
-def test_task_backed_mcp_rejection_does_not_resume_interrupt() -> None:
+def test_task_backed_mcp_rejection_resumes_interrupt() -> None:
     server = InvocationsHostServer(
-        build_simple_interrupt_graph(),
+        build_mcp_approval_interrupt_graph(),
         options=ResponsesServerOptions(steerable_conversations=True),
     )
     session_id = "foreground-hitl-rejection"
@@ -568,8 +551,9 @@ def test_task_backed_mcp_rejection_does_not_resume_interrupt() -> None:
             },
         )
 
-    assert rejected.status_code == 409, rejected.text
-    assert "rejected" in rejected.json()["error"]
+    assert rejected.status_code == 200, rejected.text
+    assert "'approve': False" in rejected.json()["response"]
+    assert "Not authorized" in rejected.json()["response"]
 
 
 def test_task_backed_invalid_hitl_input_returns_400() -> None:
@@ -1168,7 +1152,7 @@ async def test_recovered_background_invocation_replays_without_checkpoint(
 ) -> None:
     captured: dict[str, object] = {}
     pending = (
-        Interrupt(value="Approve recovered action?", id="interrupt-1")
+        mcp_approval_interrupt()
         if approve is not None
         else None
     )
@@ -1184,7 +1168,7 @@ async def test_recovered_background_invocation_replays_without_checkpoint(
         else [
             {
                 "type": "mcp_approval_response",
-                "approval_request_id": "interrupt-1",
+                "approval_request_id": "approval-1",
                 "approve": approve,
             }
         ]
@@ -1214,12 +1198,12 @@ async def test_recovered_background_invocation_replays_without_checkpoint(
     elif approve:
         graph_input = captured["input"]
         assert isinstance(graph_input, Command)
-        assert pending is not None
-        assert graph_input.resume == pending.value
+        assert graph_input.resume == {"approve": True}
     else:
-        assert "input" not in captured
-        assert result["status"] == "failed"
-        assert result["error"]["code"] == "interrupt_rejected"
+        graph_input = captured["input"]
+        assert isinstance(graph_input, Command)
+        assert graph_input.resume == {"approve": False}
+        assert result["status"] == "completed"
 
 
 @pytest.mark.asyncio

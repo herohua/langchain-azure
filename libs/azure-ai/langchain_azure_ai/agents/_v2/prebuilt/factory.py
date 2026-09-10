@@ -157,6 +157,7 @@ def _mcp_approval_node(state: MessagesState) -> Dict[str, list]:
     # Surface approval details via interrupt – graph pauses here.
     interrupt_payload = [
         {
+            "type": MCP_APPROVAL_REQUEST_TOOL_NAME,
             "id": tc["id"],
             "server_label": tc["args"].get("server_label"),
             "tool_name": tc["args"].get("name"),

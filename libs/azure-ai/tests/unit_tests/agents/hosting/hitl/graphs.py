@@ -144,6 +144,30 @@ def build_simple_interrupt_graph() -> CompiledStateGraph:
     return builder.compile(checkpointer=InMemorySaver())
 
 
+def build_mcp_approval_interrupt_graph() -> CompiledStateGraph:
+    """Minimal pause produced by the MCP approval node."""
+
+    def approve(state: MessagesState) -> dict[str, Any]:
+        decision = interrupt(
+            [
+                {
+                    "type": "mcp_approval_request",
+                    "id": "approval-1",
+                    "server_label": "files",
+                    "tool_name": "read_file",
+                    "arguments": '{"path": "README.md"}',
+                }
+            ]
+        )
+        return {"messages": [AIMessage(content=f"ok:{decision}")]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("approve", approve)
+    builder.add_edge(START, "approve")
+    builder.add_edge("approve", END)
+    return builder.compile(checkpointer=InMemorySaver())
+
+
 def build_uncheckpointed_interrupt_graph() -> CompiledStateGraph:
     """The same single pause, but compiled without a checkpointer.
 

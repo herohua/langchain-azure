@@ -96,7 +96,6 @@ from langchain_azure_ai.agents.hosting import (
 
 from ._converters import (
     build_messages_input_from_text,
-    detect_approval_rejection,
     detect_pending_interrupts,
     extract_text,
     interrupt_output_items,
@@ -398,9 +397,8 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
         - ``previous_invocation_id`` (optional) — linear-chain precondition for a
             continued ``agent_session_id``.
 
-        Pending LangGraph interrupts are exposed beside ``response`` as the same
-        paired ``function_call`` and ``mcp_approval_request`` output items used by
-        :class:`ResponsesHostServer`. Streaming requests emit each item as an
+        Ordinary interrupts are exposed as ``function_call``; MCP approval
+        interrupts preserve ``mcp_approval_request``. Streaming requests emit an
         ``output_item`` SSE event.
 
     Multi-turn continuation uses the ``agent_session_id`` query param /
@@ -554,10 +552,9 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
 
             {"response": "Assistant text"}
 
-        A pending LangGraph interrupt adds Responses-style ``function_call``
-        and ``mcp_approval_request`` items under ``output``. Resume it by
-        sending the matching ``function_call_output`` or
-        ``mcp_approval_response`` as the next request's ``message`` list.
+        Ordinary interrupts use ``function_call`` / ``function_call_output``.
+        MCP approval interrupts use ``mcp_approval_request`` /
+        ``mcp_approval_response``.
 
         Streaming requests return ``text/event-stream`` with token payloads:
 
@@ -765,6 +762,10 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
         pending = await detect_pending_interrupts(self._graph, config)
         if not pending:
             if not isinstance(message, str):
+                try:
+                    parse_resume_command(message, ())
+                except ValueError as exc:
+                    raise _HITLRequestError(str(exc)) from exc
                 raise _HITLRequestError(
                     "Structured HITL items require a pending LangGraph interrupt."
                 )
@@ -777,10 +778,10 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
                 return graph_input, []
             return None, pending_items
 
-        rejection = detect_approval_rejection(message, pending)
-        if rejection is not None:
-            raise _HITLRequestError(rejection, code="interrupt_rejected")
-        resume_command, _ = parse_resume_command(message, pending)
+        try:
+            resume_command, _ = parse_resume_command(message, pending)
+        except ValueError as exc:
+            raise _HITLRequestError(str(exc)) from exc
         if resume_command is not None:
             return cast(GraphInputT, resume_command), []
         return None, pending_items

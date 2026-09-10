@@ -291,6 +291,22 @@ def make_recovery_probe_graph(
     return cast(CompiledStateGraph, _RecoveryGraph())
 
 
+def mcp_approval_interrupt() -> Interrupt:
+    """Build a pending interrupt produced by the MCP approval node."""
+    return Interrupt(
+        id="interrupt-1",
+        value=[
+            {
+                "type": "mcp_approval_request",
+                "id": "approval-1",
+                "server_label": "files",
+                "tool_name": "read_file",
+                "arguments": '{"path": "README.md"}',
+            }
+        ],
+    )
+
+
 def make_shutdown_checkpoint_graph() -> CompiledStateGraph:
     """Return a graph that publishes a checkpoint as shutdown is signalled."""
 

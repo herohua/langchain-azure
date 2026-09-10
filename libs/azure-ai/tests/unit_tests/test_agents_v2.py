@@ -2735,6 +2735,41 @@ class TestMiddlewareSupport:
         state = {"messages": [AIMessage(content="done")]}
         assert condition(state) == "MyMiddleware.after_agent"  # type: ignore[arg-type]
 
+    def test_mcp_approval_node_marks_interrupt_protocol(self) -> None:
+        from langchain_core.messages import AIMessage
+
+        from langchain_azure_ai.agents._v2.prebuilt.factory import (
+            _mcp_approval_node,
+        )
+
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "approval-1",
+                            "name": "mcp_approval_request",
+                            "args": {
+                                "server_label": "files",
+                                "name": "read_file",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                )
+            ]
+        }
+        with patch(
+            "langchain_azure_ai.agents._v2.prebuilt.factory.interrupt",
+            return_value={"approve": True},
+        ) as interrupt_mock:
+            _mcp_approval_node(state)  # type: ignore[arg-type]
+
+        request = interrupt_mock.call_args.args[0][0]
+        assert request["type"] == "mcp_approval_request"
+        assert request["tool_name"] == "read_file"
+
     def test_routing_condition_default_end(self) -> None:
         """Test _make_agent_routing_condition defaults to __end__."""
         from langchain_core.messages import AIMessage
