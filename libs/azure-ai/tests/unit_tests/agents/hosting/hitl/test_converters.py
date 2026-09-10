@@ -38,8 +38,34 @@ from langchain_azure_ai.agents.hosting._converters import (
     parse_resume_command,
     track_pending_interrupts,
 )
+from langchain_azure_ai.agents.hosting._converters._hitl import classify_hitl_replies
 
 from .conftest import emitted_items, pending_interrupt
+
+
+class TestClassifyHITLReplies:
+    def test_approval_is_hitl_even_when_id_is_invalid(self) -> None:
+        items = [_approval_response("mcpr_stale", True)]
+
+        assert classify_hitl_replies(items, (pending_interrupt(id="int-1"),)) == (
+            True,
+            True,
+        )
+
+    def test_stale_function_output_requires_hitl_sentinel(self) -> None:
+        output = _tool_output("stale", '{"resume": "x"}')
+        sentinel = ItemFunctionToolCall(
+            type="function_call",
+            id="fc_stale",
+            call_id="stale",
+            name=HITL_FUNCTION_NAME,
+            arguments="{}",
+            status="completed",
+        )
+        pending = (pending_interrupt(id="int-1"),)
+
+        assert classify_hitl_replies([sentinel, output], pending) == (True, True)
+        assert classify_hitl_replies([output], pending) == (False, False)
 
 
 async def test_detect_pending_interrupts_returns_empty_for_stateless_runnable() -> None:

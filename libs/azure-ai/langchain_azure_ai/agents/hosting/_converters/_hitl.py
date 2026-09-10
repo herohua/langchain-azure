@@ -302,6 +302,43 @@ def hitl_call_ids(items: Sequence[Any]) -> frozenset[str]:
     return frozenset(reserved)
 
 
+def classify_hitl_replies(
+    items: Sequence[Any],
+    pending: Sequence[Interrupt],
+) -> tuple[bool, bool]:
+    """Return whether input contains HITL replies and invalid reply IDs.
+
+    MCP approval responses are unambiguously HITL. Function outputs are HITL
+    only when they target a pending interrupt or accompany this host's HITL
+    sentinel; unrelated tool outputs retain their ordinary meaning.
+
+    Args:
+        items: Resolved input items from the current request.
+        pending: Interrupts currently pending on the graph.
+
+    Returns:
+        A pair indicating whether any HITL reply was found and whether any
+        recognized reply targets an interrupt that is not pending.
+    """
+    pending_ids = {interrupt.id for interrupt in pending}
+    reserved_ids = hitl_call_ids(items)
+    has_reply = False
+    has_invalid_id = False
+    for item in items:
+        if _is_mcp_approval_response(item):
+            has_reply = True
+            interrupt_id = _interrupt_id_from_approval_id(
+                item["approval_request_id"], pending_ids
+            )
+            has_invalid_id |= interrupt_id not in pending_ids
+        elif _is_function_call_output(item) and (
+            item["call_id"] in pending_ids or item["call_id"] in reserved_ids
+        ):
+            has_reply = True
+            has_invalid_id |= item["call_id"] not in pending_ids
+    return has_reply, has_invalid_id
+
+
 def parse_resume_command(
     items: Sequence[Any],
     pending: Sequence[Interrupt],

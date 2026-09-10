@@ -81,6 +81,7 @@ from ._converters import (
     stream_graph_to_events,
     track_pending_interrupts,
 )
+from ._converters._hitl import classify_hitl_replies
 from ._responses import (
     CONVERSATION_CHECKPOINT_KEY,
     CheckpointRef,
@@ -215,6 +216,14 @@ def _message_count(
     skip_call_ids: frozenset[str] = frozenset(),
 ) -> int:
     return len(build_messages_input(items, skip_call_ids=skip_call_ids)["messages"])
+
+
+def _has_user_message(items: Sequence[Any]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and getattr(item.get("role"), "value", item.get("role")) == "user"
+        for item in items
+    )
 
 
 def _scope_thread_id(thread_id: str, context: ResponseContext) -> str:
@@ -906,6 +915,28 @@ class ResponsesHostServer:
                 pending = await detect_pending_interrupts(self._graph, config)
                 if pending:
                     _add_request_hosting_features(HostingFeature.HITL)
+                    current_items = list(await context.get_input_items())
+                    has_hitl_reply, has_invalid_hitl_id = classify_hitl_replies(
+                        current_items, pending
+                    )
+                    invalid_hitl_message = None
+                    if has_hitl_reply and _has_user_message(current_items):
+                        invalid_hitl_message = (
+                            "HITL replies and user messages must be sent in "
+                            "separate requests."
+                        )
+                    elif has_invalid_hitl_id:
+                        invalid_hitl_message = (
+                            "HITL replies must target a pending interrupt."
+                        )
+                    if invalid_hitl_message is not None:
+                        async for event in emit_interrupts(pending, stream):
+                            yield event
+                        yield stream.emit_failed(
+                            code="invalid_hitl_input",
+                            message=invalid_hitl_message,
+                        )
+                        return
                     # HITL:
                     # Rejection short-circuits the turn into ``response.failed``
                     # so a client-issued ``mcp_approval_response{approve:false}``

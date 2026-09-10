@@ -40,6 +40,7 @@ from .conftest import (
 from .graphs import (
     ScriptedModel,
     build_ask_human_graph,
+    build_side_effect_graph,
     build_simple_interrupt_graph,
 )
 
@@ -422,6 +423,316 @@ class TestMcpApprovalChannel:
         # The second scripted AIMessage must remain un-consumed because
         # the graph was not driven on the rejection turn.
         assert len(remaining) == 1
+
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_rejection_short_circuits_resume_hook(self) -> None:
+        class RejectingHost(ResponsesHostServer):
+            async def build_resume_command(self, request, context, pending):
+                raise AssertionError("resume hook must not run for rejection")
+
+        host = RejectingHost(build_simple_interrupt_graph())
+        conversation_id = "conv-rejection-short-circuit"
+        with client_for(host) as client:
+            first = client.post(
+                "/responses",
+                json={"input": "start", "conversation": {"id": conversation_id}},
+            )
+            approval_id = approval_requests(first.json())[0]["id"]
+            second = client.post(
+                "/responses",
+                json={
+                    "input": [
+                        {
+                            "type": "mcp_approval_response",
+                            "approval_request_id": approval_id,
+                            "approve": False,
+                        }
+                    ],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["error"]["code"] == "interrupt_rejected"
+
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_new_input_reemits_pending_interrupt(self, script: ScriptRegistrar) -> None:
+        key = "hitl-new-input"
+        remaining = script(
+            key,
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call_ask_conflict",
+                            "name": "AskHuman",
+                            "args": {"question": "Confirm?"},
+                        }
+                    ],
+                ),
+                AIMessage(content="approved"),
+            ],
+        )
+        host = ResponsesHostServer(build_ask_human_graph(key))
+        conversation_id = "conv-hitl-conflict"
+        with client_for(host) as client:
+            first = client.post(
+                "/responses",
+                json={
+                    "input": "start",
+                    "conversation": {"id": conversation_id},
+                },
+            )
+            call_id = sentinels(first.json())[0]["call_id"]
+            second = client.post(
+                "/responses",
+                json={
+                    "conversation": {"id": conversation_id},
+                    "input": "change course",
+                },
+            )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "completed"
+        assert sentinels(second.json())[0]["call_id"] == call_id
+        assert len(remaining) == 1
+
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            "approve",
+            "reject",
+            "function",
+            "invalid_approval",
+            "stale_approval",
+            "stale_function",
+        ],
+    )
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_decision_and_user_message_are_rejected_together(
+        self, decision: str
+    ) -> None:
+        trace: list[str] = []
+        host = ResponsesHostServer(build_side_effect_graph(trace))
+        conversation_id = f"conv-mixed-{decision}"
+        with client_for(host) as client:
+            stale = None
+            if decision.startswith("stale_"):
+                stale = client.post(
+                    "/responses",
+                    json={
+                        "input": "old request",
+                        "conversation": {"id": f"{conversation_id}-old"},
+                    },
+                ).json()
+            first = client.post(
+                "/responses",
+                json={"input": "start", "conversation": {"id": conversation_id}},
+            )
+            assert first.status_code == 200, first.text
+            call_id = sentinels(first.json())[0]["call_id"]
+            approval_id = approval_requests(first.json())[0]["id"]
+            stale_call_id = sentinels(stale)[0]["call_id"] if stale else call_id
+            stale_approval_id = (
+                approval_requests(stale)[0]["id"] if stale else approval_id
+            )
+            decision_item = (
+                resume_item(
+                    stale_call_id if decision == "stale_function" else call_id,
+                    "Ada",
+                )
+                if decision in {"function", "stale_function"}
+                else {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": (
+                        stale_approval_id
+                        if decision == "stale_approval"
+                        else "mcpr_invalid"
+                        if decision == "invalid_approval"
+                        else approval_id
+                    ),
+                    "approve": decision == "approve",
+                }
+            )
+            input_items = [decision_item]
+            if decision == "stale_function":
+                input_items.insert(0, sentinel_item(stale_call_id))
+            trace.clear()
+
+            second = client.post(
+                "/responses",
+                json={
+                    "input": [
+                        *input_items,
+                        {
+                            "role": "user",
+                            "content": "also change cities",
+                        },
+                    ],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+            state = host.graph.get_state(
+                {"configurable": {"thread_id": conversation_id}}
+            )
+            assert trace == []
+            assert all(
+                message.content != "also change cities"
+                for message in state.values["messages"]
+            )
+            resumed = client.post(
+                "/responses",
+                json={
+                    "input": [resume_item(call_id, "Ada")],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "failed"
+        assert second.json()["error"]["code"] == "invalid_hitl_input"
+        assert sentinels(second.json())[0]["call_id"] == call_id
+        assert resumed.status_code == 200, resumed.text
+        assert "done:Ada" in assistant_text(resumed.json())
+
+    @pytest.mark.parametrize(
+        "reply", ["invalid_approval", "stale_approval", "stale_function"]
+    )
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_invalid_standalone_hitl_reply_fails(self, reply: str) -> None:
+        host = ResponsesHostServer(build_simple_interrupt_graph())
+        conversation_id = f"conv-invalid-{reply}"
+        with client_for(host) as client:
+            stale = None
+            if reply.startswith("stale_"):
+                stale = client.post(
+                    "/responses",
+                    json={
+                        "input": "old request",
+                        "conversation": {"id": f"{conversation_id}-old"},
+                    },
+                ).json()
+            first = client.post(
+                "/responses",
+                json={"input": "start", "conversation": {"id": conversation_id}},
+            )
+            call_id = sentinels(first.json())[0]["call_id"]
+            stale_call_id = sentinels(stale)[0]["call_id"] if stale else ""
+            invalid_items = (
+                [
+                    {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": (
+                            approval_requests(stale)[0]["id"]
+                            if stale
+                            else "mcpr_invalid"
+                        ),
+                        "approve": True,
+                    }
+                ]
+                if reply.endswith("approval")
+                else [
+                    sentinel_item(stale_call_id),
+                    resume_item(stale_call_id, "Ada"),
+                ]
+            )
+            invalid = client.post(
+                "/responses",
+                json={
+                    "input": invalid_items,
+                    "conversation": {"id": conversation_id},
+                },
+            )
+            resumed = client.post(
+                "/responses",
+                json={
+                    "input": [resume_item(call_id, "Ada")],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+
+        assert invalid.status_code == 200, invalid.text
+        assert invalid.json()["error"]["code"] == "invalid_hitl_input"
+        assert sentinels(invalid.json())[0]["call_id"] == call_id
+        assert resumed.status_code == 200, resumed.text
+        assert "ok:Ada" in assistant_text(resumed.json())
+
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_unknown_tool_output_is_not_treated_as_hitl(self) -> None:
+        host = ResponsesHostServer(build_simple_interrupt_graph())
+        conversation_id = "conv-ordinary-tool-output"
+        with client_for(host) as client:
+            first = client.post(
+                "/responses",
+                json={"input": "start", "conversation": {"id": conversation_id}},
+            )
+            call_id = sentinels(first.json())[0]["call_id"]
+            second = client.post(
+                "/responses",
+                json={
+                    "input": [
+                        {
+                            "type": "function_call_output",
+                            "call_id": "ordinary-tool-call",
+                            "output": "done",
+                        },
+                        {"role": "user", "content": "new input"},
+                    ],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "completed"
+        assert second.json().get("error") is None
+        assert sentinels(second.json())[0]["call_id"] == call_id
+
+    @REAL_INTERRUPT_ASYNC_XFAIL
+    def test_explicit_resume_and_update_are_forwarded(self) -> None:
+        host = ResponsesHostServer(build_side_effect_graph([]))
+        conversation_id = "conv-explicit-resume-update"
+        with client_for(host) as client:
+            first = client.post(
+                "/responses",
+                json={"input": "start", "conversation": {"id": conversation_id}},
+            )
+            call_id = sentinels(first.json())[0]["call_id"]
+            second = client.post(
+                "/responses",
+                json={
+                    "input": [
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(
+                                {
+                                    "resume": "Ada",
+                                    "update": {
+                                        "messages": [
+                                            {
+                                                "role": "user",
+                                                "content": "explicit update",
+                                            }
+                                        ]
+                                    },
+                                }
+                            ),
+                        }
+                    ],
+                    "conversation": {"id": conversation_id},
+                },
+            )
+            state = host.graph.get_state(
+                {"configurable": {"thread_id": conversation_id}}
+            )
+
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "completed"
+        assert "done:Ada" in assistant_text(second.json())
+        assert any(
+            message.content == "explicit update" for message in state.values["messages"]
+        )
 
 
 class TestThreadScoping:

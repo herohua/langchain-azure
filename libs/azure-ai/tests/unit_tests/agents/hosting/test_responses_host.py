@@ -755,6 +755,40 @@ async def test_recovery_replays_hitl_rejection_without_current_response_checkpoi
     assert failed["response"]["error"]["code"] == "interrupt_rejected"
 
 
+async def test_recovery_rejects_mixed_hitl_input_without_current_checkpoint(
+    foundry_state_stores: dict[str, dict[str, Any]],
+) -> None:
+    _seed_conversation_checkpoint(
+        foundry_state_stores,
+        "chain-1",
+        thread_id="resp-root",
+        checkpoint_id="checkpoint-parent",
+    )
+    captured: dict[str, Any] = {}
+    pending = Interrupt(value="Approve recovered action?", id="interrupt-1")
+    server = ResponsesHostServer(make_recovery_probe_graph(captured, pending))
+    context = _context(conversation_id=None, conversation_chain_id="chain-1")
+    context.is_recovery = True
+    context.persisted_response = _response_object("resp-current")
+    context.get_input_items.return_value = [
+        {
+            "type": "mcp_approval_response",
+            "approval_request_id": pending.id,
+            "approve": True,
+        },
+        _message_item("do not replay"),
+    ]
+
+    events = [
+        event
+        async for event in server.handle_create(_request(), context, asyncio.Event())
+    ]
+
+    assert "input" not in captured
+    failed = next(event for event in events if event.get("type") == "response.failed")
+    assert failed["response"]["error"]["code"] == "invalid_hitl_input"
+
+
 @pytest.mark.parametrize(
     "input_items",
     [
