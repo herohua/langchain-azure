@@ -257,7 +257,7 @@ def test_invocation_emits_and_resumes_structured_hitl_items() -> None:
         pending = [
             item
             for item in first.json()["output"]
-            if item.get("type") == "function_call"
+            if item.get("type") == "mcp_approval_request"
             and item.get("name") == HITL_FUNCTION_NAME
         ]
         assert len(pending) == 1
@@ -267,16 +267,19 @@ def test_invocation_emits_and_resumes_structured_hitl_items() -> None:
             json={
                 "message": [
                     {
-                        "type": "function_call_output",
-                        "call_id": pending[0]["call_id"],
-                        "output": json.dumps({"resume": "Alice"}),
+                        "type": "mcp_approval_response",
+                        "approval_request_id": pending[0]["id"],
+                        "approve": True,
+                        "reason": "Alice",
                     }
                 ]
             },
         )
 
     assert second.status_code == 200, second.text
-    assert second.json() == {"response": "ok:Alice"}
+    assert second.json() == {
+        "response": "ok:{'approve': True, 'reason': 'Alice'}"
+    }
 
 
 @REAL_INTERRUPT_ASYNC_XFAIL
@@ -310,7 +313,7 @@ def test_invocation_accepts_mcp_approval_response() -> None:
         )
 
     assert second.status_code == 200, second.text
-    assert second.json() == {"response": "ok:name?"}
+    assert second.json() == {"response": "ok:{'approve': True}"}
 
 
 @pytest.mark.parametrize(
@@ -331,9 +334,9 @@ def test_partial_parallel_resume_emits_only_active_interrupts(
         )
         assert first.status_code == 200, first.text
         pending = {
-            json.loads(item["arguments"])["value"]: item["call_id"]
+            json.loads(item["arguments"])["value"]: item["id"]
             for item in first.json()["output"]
-            if item.get("type") == "function_call"
+            if item.get("type") == "mcp_approval_request"
         }
         assert set(pending) == {"question_a", "question_b"}
 
@@ -342,9 +345,9 @@ def test_partial_parallel_resume_emits_only_active_interrupts(
             json={
                 "message": [
                     {
-                        "type": "function_call_output",
-                        "call_id": pending["question_a"],
-                        "output": json.dumps({"resume": "A"}),
+                        "type": "mcp_approval_response",
+                        "approval_request_id": pending["question_a"],
+                        "approve": True,
                     }
                 ]
             },
@@ -354,7 +357,7 @@ def test_partial_parallel_resume_emits_only_active_interrupts(
     remaining = [
         json.loads(item["arguments"])["value"]
         for item in second.json()["output"]
-        if item.get("type") == "function_call"
+        if item.get("type") == "mcp_approval_request"
     ]
     assert remaining == ["question_b"]
 
@@ -364,7 +367,7 @@ def test_partial_parallel_resume_emits_only_active_interrupts(
     [None, ResponsesServerOptions(steerable_conversations=True)],
 )
 @REAL_INTERRUPT_ASYNC_XFAIL
-def test_parallel_rejection_blocks_other_resume(
+def test_parallel_approvals_preserve_each_decision(
     options: ResponsesServerOptions | None,
 ) -> None:
     server = InvocationsHostServer(build_parallel_interrupt_graph(), options=options)
@@ -376,11 +379,6 @@ def test_parallel_rejection_blocks_other_resume(
             json={"message": "Ask both."},
         )
         assert first.status_code == 200, first.text
-        function_calls = {
-            json.loads(item["arguments"])["value"]: item["call_id"]
-            for item in first.json()["output"]
-            if item.get("type") == "function_call"
-        }
         approvals = {
             json.loads(item["arguments"])["value"]: item["id"]
             for item in first.json()["output"]
@@ -392,9 +390,10 @@ def test_parallel_rejection_blocks_other_resume(
             json={
                 "message": [
                     {
-                        "type": "function_call_output",
-                        "call_id": function_calls["question_a"],
-                        "output": json.dumps({"resume": "A"}),
+                        "type": "mcp_approval_response",
+                        "approval_request_id": approvals["question_a"],
+                        "approve": True,
+                        "reason": "A",
                     },
                     {
                         "type": "mcp_approval_response",
@@ -406,8 +405,9 @@ def test_parallel_rejection_blocks_other_resume(
             },
         )
 
-    assert second.status_code == 409, second.text
-    assert "Not authorized" in second.json()["error"]
+    assert second.status_code == 200, second.text
+    assert "'approve': False" in second.json()["response"]
+    assert "Not authorized" in second.json()["response"]
 
 
 @REAL_INTERRUPT_ASYNC_XFAIL
@@ -421,18 +421,18 @@ def test_streaming_partial_resume_omits_answered_empty_update_branch() -> None:
             json={"message": "Ask both."},
         )
         pending = {
-            json.loads(item["arguments"])["value"]: item["call_id"]
+            json.loads(item["arguments"])["value"]: item["id"]
             for item in first.json()["output"]
-            if item.get("type") == "function_call"
+            if item.get("type") == "mcp_approval_request"
         }
         second = client.post(
             f"/invocations?agent_session_id={session_id}",
             json={
                 "message": [
                     {
-                        "type": "function_call_output",
-                        "call_id": pending["question_a"],
-                        "output": json.dumps({"resume": "A"}),
+                        "type": "mcp_approval_response",
+                        "approval_request_id": pending["question_a"],
+                        "approve": True,
                     }
                 ],
                 "stream": True,
@@ -448,7 +448,7 @@ def test_streaming_partial_resume_omits_answered_empty_update_branch() -> None:
     remaining = [
         json.loads(item["arguments"])["value"]
         for item in output_items
-        if item.get("type") == "function_call"
+        if item.get("type") == "mcp_approval_request"
     ]
     assert remaining == ["question_b"]
 
@@ -531,13 +531,13 @@ def test_task_backed_foreground_invocation_preserves_hitl_output() -> None:
 
     assert response.status_code == 200, response.text
     assert any(
-        item.get("type") == "function_call" and item.get("name") == HITL_FUNCTION_NAME
+        item.get("type") == "mcp_approval_request"
         for item in response.json()["output"]
     )
 
 
 @REAL_INTERRUPT_ASYNC_XFAIL
-def test_task_backed_mcp_rejection_does_not_resume_interrupt() -> None:
+def test_task_backed_mcp_rejection_resumes_interrupt() -> None:
     server = InvocationsHostServer(
         build_simple_interrupt_graph(),
         options=ResponsesServerOptions(steerable_conversations=True),
@@ -568,8 +568,9 @@ def test_task_backed_mcp_rejection_does_not_resume_interrupt() -> None:
             },
         )
 
-    assert rejected.status_code == 409, rejected.text
-    assert "rejected" in rejected.json()["error"]
+    assert rejected.status_code == 200, rejected.text
+    assert "'approve': False" in rejected.json()["response"]
+    assert "Not authorized" in rejected.json()["response"]
 
 
 def test_task_backed_invalid_hitl_input_returns_400() -> None:
@@ -615,7 +616,7 @@ def test_streaming_invocation_emits_structured_hitl_items() -> None:
     pending = [
         item
         for item in events
-        if item.get("type") == "function_call"
+        if item.get("type") == "mcp_approval_request"
         and item.get("name") == HITL_FUNCTION_NAME
     ]
     assert len(pending) == 1
@@ -675,7 +676,7 @@ def test_background_invocation_emits_and_resumes_structured_hitl_items() -> None
         pending = [
             item
             for item in first_result.json()["output"]
-            if item.get("type") == "function_call"
+            if item.get("type") == "mcp_approval_request"
             and item.get("name") == HITL_FUNCTION_NAME
         ]
         assert len(pending) == 1
@@ -685,9 +686,10 @@ def test_background_invocation_emits_and_resumes_structured_hitl_items() -> None
             json={
                 "message": [
                     {
-                        "type": "function_call_output",
-                        "call_id": pending[0]["call_id"],
-                        "output": json.dumps({"resume": "Alice"}),
+                        "type": "mcp_approval_response",
+                        "approval_request_id": pending[0]["id"],
+                        "approve": True,
+                        "reason": "Alice",
                     }
                 ],
                 "background": True,
@@ -702,7 +704,9 @@ def test_background_invocation_emits_and_resumes_structured_hitl_items() -> None
             second_result = client.get(f"/invocations/{second.json()['id']}")
 
     assert second_result.status_code == 200, second_result.text
-    assert second_result.json()["response"] == "ok:Alice"
+    assert second_result.json()["response"] == (
+        "ok:{'approve': True, 'reason': 'Alice'}"
+    )
     assert "output" not in second_result.json()
 
 
@@ -1215,11 +1219,12 @@ async def test_recovered_background_invocation_replays_without_checkpoint(
         graph_input = captured["input"]
         assert isinstance(graph_input, Command)
         assert pending is not None
-        assert graph_input.resume == pending.value
+        assert graph_input.resume == {"approve": True}
     else:
-        assert "input" not in captured
-        assert result["status"] == "failed"
-        assert result["error"]["code"] == "interrupt_rejected"
+        graph_input = captured["input"]
+        assert isinstance(graph_input, Command)
+        assert graph_input.resume == {"approve": False}
+        assert result["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -1365,8 +1370,9 @@ async def test_recovered_invocation_reads_pending_hitl_from_latest_checkpoint() 
     result = await server._execute_task_invocation(context)
 
     assert any(
-        item.get("type") == "function_call"
-        and item.get("call_id") == "recovered-interrupt"
+        item.get("type") == "mcp_approval_request"
+        and json.loads(item["arguments"])["interrupt_id"]
+        == "recovered-interrupt"
         for item in result["output"]
     )
 

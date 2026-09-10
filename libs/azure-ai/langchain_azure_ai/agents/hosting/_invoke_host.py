@@ -96,7 +96,6 @@ from langchain_azure_ai.agents.hosting import (
 
 from ._converters import (
     build_messages_input_from_text,
-    detect_approval_rejection,
     detect_pending_interrupts,
     extract_text,
     interrupt_output_items,
@@ -388,8 +387,7 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
     Where:
 
         - ``message`` (required) — user message text, or a non-empty list containing
-            a Responses-style ``function_call_output`` / ``mcp_approval_response``
-            item that answers a pending LangGraph interrupt.
+            a Responses-style ``mcp_approval_response`` for a pending interrupt.
     - ``stream`` (optional, default ``false``) — when ``true`` returns SSE
       with token deltas; when ``false`` returns a single JSON response.
         - ``background`` (optional, default ``false``) — when ``true`` starts a
@@ -398,9 +396,8 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
         - ``previous_invocation_id`` (optional) — linear-chain precondition for a
             continued ``agent_session_id``.
 
-        Pending LangGraph interrupts are exposed beside ``response`` as the same
-        paired ``function_call`` and ``mcp_approval_request`` output items used by
-        :class:`ResponsesHostServer`. Streaming requests emit each item as an
+        Pending LangGraph interrupts are exposed beside ``response`` as
+        ``mcp_approval_request`` output items. Streaming requests emit each item as an
         ``output_item`` SSE event.
 
     Multi-turn continuation uses the ``agent_session_id`` query param /
@@ -554,10 +551,9 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
 
             {"response": "Assistant text"}
 
-        A pending LangGraph interrupt adds Responses-style ``function_call``
-        and ``mcp_approval_request`` items under ``output``. Resume it by
-        sending the matching ``function_call_output`` or
-        ``mcp_approval_response`` as the next request's ``message`` list.
+        A pending LangGraph interrupt adds a Responses-style
+        ``mcp_approval_request`` under ``output``. Resume it by sending the
+        matching ``mcp_approval_response`` as the next ``message`` list.
 
         Streaming requests return ``text/event-stream`` with token payloads:
 
@@ -777,10 +773,10 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
                 return graph_input, []
             return None, pending_items
 
-        rejection = detect_approval_rejection(message, pending)
-        if rejection is not None:
-            raise _HITLRequestError(rejection, code="interrupt_rejected")
-        resume_command, _ = parse_resume_command(message, pending)
+        try:
+            resume_command, _ = parse_resume_command(message, pending)
+        except ValueError as exc:
+            raise _HITLRequestError(str(exc)) from exc
         if resume_command is not None:
             return cast(GraphInputT, resume_command), []
         return None, pending_items
@@ -875,8 +871,7 @@ class InvocationsHostServer(Generic[GraphInputT, GraphOutputT]):
                 message, config
             )
         except _HITLRequestError as exc:
-            status_code = 409 if exc.code == "interrupt_rejected" else 400
-            return JSONResponse({"error": str(exc)}, status_code=status_code)
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
         if graph_input is None:
             if stream:

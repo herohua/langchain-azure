@@ -192,13 +192,12 @@ a LangGraph checkpointer; use a durable checkpointer for hosted production deplo
 Callers can also send `previous_invocation_id` to enforce linear extension of a
 session chain.
 
-When a checkpointed graph calls `interrupt()`, the Invocations host adds an
-`output` array containing the same paired `function_call` and
-`mcp_approval_request` items as `ResponsesHostServer`. Resume the graph by
-sending a matching `function_call_output` or `mcp_approval_response` item as
-the next request's `message` list. Streaming requests emit these as
-`output_item` SSE events. Existing string `message` requests and responses
-without pending interrupts keep their original shape.
+When a checkpointed graph calls `interrupt()`, both hosts emit an
+`mcp_approval_request`. A matching `mcp_approval_response` resumes the graph
+with `{"approve": bool}` plus `reason` when supplied. Unknown, expired,
+malformed, or duplicate approval IDs fail before graph execution. This changes
+the prior contract, which returned the original interrupt value. Ordinary tool
+`function_call` and `function_call_output` items are unchanged.
 
 The Responses host uses one conversation-state source per graph. The policy depends on whether the hosted graph has a LangGraph checkpointer:
 

@@ -883,11 +883,7 @@ def check_07_observability() -> None:
 
 
 def check_06_pause_then_resume() -> None:
-    """responses/08_hitl: approval-style HITL — mcp_approval_request paired
-    with function_call; primary resume via mcp_approval_response; rejection
-    surfaces as response.failed; rich override still works via
-    function_call_output.
-    """
+    """responses/08_hitl: MCP approval responses resume ordinary interrupts."""
     requires_foundry_endpoint()
     server = start_sample("responses/08_hitl/main.py")
     try:
@@ -898,7 +894,7 @@ def check_06_pause_then_resume() -> None:
         conversation_a = f"e2e-hitl-approve-{uuid.uuid4().hex[:8]}"
         _kv("conversation.id (Run A — approve)", conversation_a)
 
-        _step("Run A turn 1 — POST /responses (expect paired approval items)")
+        _step("Run A turn 1 — POST /responses (expect one approval item)")
         first = _post(
             server,
             "/responses",
@@ -917,7 +913,7 @@ def check_06_pause_then_resume() -> None:
             if item.get("type") == "mcp_approval_request"
             and item.get("name") == "__hosted_agent_adapter_interrupt__"
         ]
-        interrupts = [
+        substitutes = [
             item
             for item in first_payload["output"]
             if item.get("type") == "function_call"
@@ -927,27 +923,16 @@ def check_06_pause_then_resume() -> None:
             bool(approvals),
             "turn 1 surfaces the OpenAI-standard mcp_approval_request item",
         )
-        _assert(
-            bool(interrupts),
-            "turn 1 also surfaces the paired function_call (advanced channel)",
-        )
+        _assert(not substitutes, "turn 1 has no substitute function_call")
         approval_id = approvals[0]["id"]
-        call_id = interrupts[0]["call_id"]
         _kv("mcp_approval_request.id", approval_id)
-        _kv("function_call.call_id", call_id)
-        _assert(
-            approval_id == call_id,
-            "mcp_approval_request.id == function_call.call_id (same interrupt id)",
-        )
         # Envelope shape: arguments JSON describes the proposed tool call.
         try:
             envelope = json.loads(approvals[0]["arguments"])
         except (TypeError, ValueError):
             envelope = None
         _assert(
-            isinstance(envelope, dict)
-            and envelope.get("interrupt_id") == approval_id
-            and isinstance(envelope.get("value"), dict)
+            isinstance(envelope, dict) and isinstance(envelope.get("value"), dict)
             and envelope["value"].get("tool") == "get_weather",
             "approval arguments envelope describes the proposed get_weather call",
         )
@@ -987,8 +972,7 @@ def check_06_pause_then_resume() -> None:
         )
 
         # ------------------------------------------------------------------
-        # Run B: reject via mcp_approval_response — the host should
-        # surface response.failed(code="interrupt_rejected").
+        # Run B: reject via mcp_approval_response — the graph handles it.
         # ------------------------------------------------------------------
         conversation_b = f"e2e-hitl-reject-{uuid.uuid4().hex[:8]}"
         _kv("conversation.id (Run B — reject)", conversation_b)
@@ -1038,83 +1022,12 @@ def check_06_pause_then_resume() -> None:
         )
         secondb_payload = secondb.json()
         _assert(
-            secondb_payload["status"] == "failed",
-            f"Run B turn 2 status == failed (got {secondb_payload.get('status')!r})",
-        )
-        err = secondb_payload.get("error") or {}
-        _assert(
-            err.get("code") == "interrupt_rejected",
-            f"error.code == interrupt_rejected (got {err.get('code')!r})",
+            secondb_payload["status"] == "completed",
+            f"Run B turn 2 status == completed (got {secondb_payload.get('status')!r})",
         )
         _assert(
-            approval_id_b in (err.get("message") or ""),
-            "rejection message references the interrupt id",
-        )
-
-        # ------------------------------------------------------------------
-        # Run C (advanced): override the proposed tool args via
-        # function_call_output (richer channel for non-vanilla clients).
-        # ------------------------------------------------------------------
-        conversation_c = f"e2e-hitl-override-{uuid.uuid4().hex[:8]}"
-        _kv("conversation.id (Run C — function_call_output override)", conversation_c)
-
-        _step("Run C turn 1 — POST /responses (expect approval prompt)")
-        firstc = _post(
-            server,
-            "/responses",
-            json_body={
-                "input": "What is the weather in Seattle?",
-                "conversation": {"id": conversation_c},
-            },
-            timeout=180.0,
-        )
-        _assert(
-            firstc.status_code == 200,
-            f"Run C turn 1 HTTP 200 (got {firstc.status_code})",
-        )
-        interrupts_c = [
-            it
-            for it in firstc.json()["output"]
-            if it.get("type") == "function_call"
-            and it.get("name") == "__hosted_agent_adapter_interrupt__"
-        ]
-        _assert(bool(interrupts_c), "Run C turn 1 surfaces sentinel function_call")
-        call_id_c = interrupts_c[0]["call_id"]
-
-        _step("Run C turn 2 — override args via function_call_output")
-        override_payload = {
-            "resume": {
-                "tool": "get_weather",
-                "arguments": {"location": "Vancouver"},
-            }
-        }
-        secondc = _post(
-            server,
-            "/responses",
-            json_body={
-                "conversation": {"id": conversation_c},
-                "input": [
-                    {
-                        "type": "function_call_output",
-                        "call_id": call_id_c,
-                        "output": json.dumps(override_payload),
-                    }
-                ],
-            },
-            timeout=300.0,
-        )
-        _assert(
-            secondc.status_code == 200,
-            f"Run C turn 2 HTTP 200 (got {secondc.status_code})",
-        )
-        secondc_payload = secondc.json()
-        _assert(
-            secondc_payload["status"] == "completed",
-            "Run C turn 2 status == completed",
-        )
-        _assert(
-            "vancouver" in _response_text(secondc_payload).lower(),
-            "Run C final text reflects the overridden location (Vancouver)",
+            "automated test rejection" in _response_text(secondb_payload),
+            "graph receives and reports the rejection reason",
         )
     finally:
         server.terminate()

@@ -107,11 +107,11 @@ async def emitted_items(interrupts: Any) -> list[Any]:
 
 
 def sentinels(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the ``function_call`` HITL sentinels in a response payload."""
+    """Adapt approval requests for legacy graph-behavior tests."""
     return [
-        item
+        {**item, "call_id": json.loads(item["arguments"])["interrupt_id"]}
         for item in payload["output"]
-        if item.get("type") == "function_call"
+        if item.get("type") == "mcp_approval_request"
         and item.get("name") == HITL_FUNCTION_NAME
     ]
 
