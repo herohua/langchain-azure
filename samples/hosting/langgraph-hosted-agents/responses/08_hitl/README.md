@@ -192,9 +192,6 @@ curl -X POST http://127.0.0.1:8088/responses \
 
 The graph resumes with the client-supplied payload (`Vancouver` instead
 of `Seattle`) and the tool is invoked with the overridden arguments.
-To accept Seattle through this channel, put the original proposal under
-`resume`. Keep the envelope: a JSON string without `resume`, `update`, or
-`goto` is passed through as a string, rather than decoded into a dictionary.
 
 This channel supports `{"resume": ...}`, `{"update": {...}}`, and
 `{"goto": "..."}` in any combination — the same payload shape as a
