@@ -3,15 +3,19 @@
 A [LangGraph](https://langchain-ai.github.io/langgraph/) **human-in-the-loop**
 agent hosted using the **Responses protocol**, modelled as a
 **tool-call approval flow**: before any tool runs, the graph pauses
-and surfaces the proposed call to the client as the **standard OpenAI
-`mcp_approval_request` output item**. Any Responses-API client that
-already supports MCP server approvals (e.g. the OpenAI Python SDK)
-can drive this agent without code changes.
+and surfaces the proposed call using the OpenAI `mcp_approval_request`
+item format as a host compatibility shortcut. No MCP server is involved.
 
-The host also emits a paired `function_call` item with the same id, so
+The host also emits a paired `function_call` item for the same interrupt, so
 clients that need to override the approval payload (or send a richer
 LangGraph `Command`) can use the standard `function_call_output` channel
 as an alternative.
+
+`function_call_output` is the general resume channel: return the original
+proposal or supply a replacement inside `output = json.dumps({"resume": value})`.
+The MCP shortcut only accepts the original `interrupt.value` unchanged; it does
+not supply new input or pass `True` to the graph. For questions or forms that
+need new data, use the function channel even though both items are emitted.
 
 ## How It Works
 
@@ -25,7 +29,7 @@ See [main.py](main.py) for the full implementation.
 
 ### Approval-style HITL
 
-The graph has three nodes:
+The graph has two nodes:
 
 - `agent` — invokes the chat model.
 - `approve_and_call_tool` — when the model emits a tool call, this
@@ -37,7 +41,7 @@ When the graph pauses, the host serializes the pending interrupt as
 **two** output items in the same response, both keyed by the same
 LangGraph interrupt id:
 
-1. An **`mcp_approval_request`** item with `id == interrupt.id`,
+1. An **`mcp_approval_request`** item with a generated `mcpr_*` id,
    `server_label == "langgraph"`, `name ==
    "__hosted_agent_adapter_interrupt__"`, and `arguments` JSON of the
    form:
@@ -50,8 +54,12 @@ LangGraph interrupt id:
    interrupt.id` carrying the same `arguments`. (Parallel rich channel
    for callers that need to drive an arbitrary LangGraph `Command`.)
 
+The two wire IDs are different. Match their decoded `arguments.interrupt_id`
+to present one prompt, then answer one channel only: use the MCP item's `id`
+as `approval_request_id`, or the function item's `call_id` for a function reply.
+
 State is persisted by a checkpointer keyed by the `conversation.id`, so the
-second request continues the paused run from exactly where it left off. Local
+second request resumes the paused node (code before `interrupt()` runs again). Local
 runs use `InMemorySaver`; Foundry-hosted runs use `FoundryCheckpointSaver` so
 an approval pause survives container replacement.
 
@@ -91,7 +99,7 @@ The response `output` array will contain:
 - an `mcp_approval_request` item — the OpenAI-standard approval
   prompt. **Copy its `id`** to use in Step 2.
 - a paired `function_call` item with `name ==
-  "__hosted_agent_adapter_interrupt__"` and the same id (advanced
+  "__hosted_agent_adapter_interrupt__"` for the same interrupt (advanced
   channel — see "Advanced resume" below).
 
 The approval item's `arguments` JSON describes the proposed action:
@@ -126,9 +134,8 @@ The host resumes the graph with the original `proposed` payload echoed
 back; `approve_and_call_tool` invokes `get_weather`, and the agent
 returns a final assistant `message` item.
 
-This is the same wire flow OpenAI's Responses API uses for MCP server
-tool approvals — any standard Responses client will already know how
-to render it.
+This example deliberately accepts the proposal itself as the resume value,
+which makes the shortcut usable with clients that provide an MCP approval UI.
 
 #### Reject — `mcp_approval_response` with `approve: false`
 
@@ -161,7 +168,8 @@ The host short-circuits the turn into:
 ```
 
 The pending interrupt remains in the checkpoint, so the next request
-can retry with a different decision.
+can retry with a different decision using the same conversation and saved IDs.
+This does not cancel the graph or deliver `False` to the paused node.
 
 ### Advanced resume — `function_call_output` (override the proposed payload)
 
@@ -187,6 +195,9 @@ curl -X POST http://127.0.0.1:8088/responses \
 
 The graph resumes with the client-supplied payload (`Vancouver` instead
 of `Seattle`) and the tool is invoked with the overridden arguments.
+To accept Seattle through this channel, put the original proposal under
+`resume`. Keep the envelope: a JSON string without `resume`, `update`, or
+`goto` is passed through as a string, rather than decoded into a dictionary.
 
 This channel supports `{"resume": ...}`, `{"update": {...}}`, and
 `{"goto": "..."}` in any combination — the same payload shape as a
