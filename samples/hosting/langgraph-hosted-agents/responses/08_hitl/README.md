@@ -3,19 +3,15 @@
 A [LangGraph](https://langchain-ai.github.io/langgraph/) **human-in-the-loop**
 agent hosted using the **Responses protocol**, modelled as a
 **tool-call approval flow**: before any tool runs, the graph pauses
-and surfaces the proposed call using the OpenAI `mcp_approval_request`
-item format as a host compatibility shortcut. No MCP server is involved.
+and surfaces the proposed call to the client as the **standard OpenAI
+`mcp_approval_request` output item**. Responses-API clients that
+already support MCP server approvals can use the same approval-response
+format to drive this agent.
 
 The host also emits a paired `function_call` item for the same interrupt, so
 clients that need to override the approval payload (or send a richer
 LangGraph `Command`) can use the standard `function_call_output` channel
 as an alternative.
-
-`function_call_output` is the general resume channel: return the original
-proposal or supply a replacement inside `output = json.dumps({"resume": value})`.
-The MCP shortcut only accepts the original `interrupt.value` unchanged; it does
-not supply new input or pass `True` to the graph. For questions or forms that
-need new data, use the function channel even though both items are emitted.
 
 ## How It Works
 
@@ -134,8 +130,9 @@ The host resumes the graph with the original `proposed` payload echoed
 back; `approve_and_call_tool` invokes `get_weather`, and the agent
 returns a final assistant `message` item.
 
-This example deliberately accepts the proposal itself as the resume value,
-which makes the shortcut usable with clients that provide an MCP approval UI.
+This is the same approval request/response format OpenAI's Responses API uses
+for MCP server tool approvals. Here, approval returns the original proposal,
+not `True`. For an interrupt that needs new input, use `function_call_output`.
 
 #### Reject — `mcp_approval_response` with `approve: false`
 
