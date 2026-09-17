@@ -31,6 +31,7 @@ Then in another terminal:
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -55,6 +56,7 @@ load_dotenv()
 
 
 _AZURE_AI_SCOPE = "https://ai.azure.com/.default"
+logger = logging.getLogger(__name__)
 
 
 @before_model
@@ -64,7 +66,7 @@ def print_invocation_metadata(state: Any, runtime: Any) -> None:
     metadata = get_config().get("configurable", {}).get(
         "invocation_metadata", {}
     )
-    print(f"Invocation metadata: {metadata}")
+    logger.info("Invocation metadata: %s", metadata)
 
 
 class MetadataInvocationsHostServer(InvocationsHostServer):
