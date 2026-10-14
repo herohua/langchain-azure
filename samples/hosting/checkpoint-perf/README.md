@@ -1,0 +1,47 @@
+# Local Checkpoint Performance Example
+
+A deterministic graph runs through the public `ResponsesHostServer`, `FoundryCheckpointSaver`, conversation-chain store, and real Azure storage HTTP pipeline. No model, search, Azure credentials, deployment, or service calls are needed.
+
+The storage transport is an offline fixture with configurable asynchronous delay. Normal local file storage bypasses the HTTP pipeline, so it cannot expose repeated descriptor GETs or transport construction. This fixture selects the storage HTTP path while keeping the host's response/task persistence local. SDK checkpoint and hosting code are unchanged.
+
+## Run
+
+From this sample directory:
+
+```powershell
+python -m uv venv --python 3.12
+python -m uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+.\.venv\Scripts\python.exe benchmark.py --output results/my-baseline.json
+```
+
+Defaults: three fresh Python processes, four turns in one conversation, one fresh-conversation control, 24 pending writes, and a requested 5 ms delay per storage operation. Each run gets empty temporary storage. Existing output files are never overwritten.
+
+```powershell
+# Exercise multiple pending-write pages and remove the injected delay.
+.\.venv\Scripts\python.exe benchmark.py --repeats 1 --pending-writes 105 --delay-ms 0 --output results/my-pagination.json
+.\.venv\Scripts\python.exe -m unittest discover -s . -p test_benchmark.py -v
+```
+
+## Workloads and recorded data
+
+- **Conversation:** append a deterministic line to `/final_report.md`, update TODOs, and return `READY <turn>`. Completion status and turn count are checked. An inspection outside timed requests checks actual file contents, TODOs, and message count after graph/host reconstruction.
+- **Pending writes:** seed a separate checkpoint with the requested number of task outputs, then time `aget_tuple`. Verify every returned value and its ordering. Setup writes are excluded from the measured read.
+- **Timing:** imports, graph/host construction, and host lifespan startup; complete in-process request duration; storage interval union; descriptor/item/list/write counts; transport constructions and maximum concurrent storage calls. Raw storage events, package versions, and hashes of the four relevant SDK source files are retained in JSON.
+
+All constructed transports must be closed. There is no LLM/search duration to subtract. Storage interval unions must not be subtracted again from the total when reporting SDK overhead.
+
+## Compare an SDK change
+
+The requirements install this checkout's `libs/azure-ai` package in editable mode and pin the storage/Responses/LangGraph versions used by the local baseline. On Linux/macOS, replace `.venv/Scripts/python.exe` with `.venv/bin/python` in the commands. See [results](results/RESULTS.md) for the local baseline.
+
+Run the same script in separate base/candidate environments with identical dependencies except the SDK change. Use the Python executable from each environment; the script imports whichever SDK that interpreter resolves. Install another source checkout with `python -m uv pip install --python <python-executable> --no-deps --editable <checkout>/libs/azure-ai`. AgentServer core changes require installing that package into the same environment too.
+
+Use a small base/candidate/candidate/base sequence with separate output files and identical `--turns`, `--pending-writes`, and `--delay-ms`. Do not run `uv sync` after installing a candidate: it can restore the locked baseline. Record the source commits alongside the JSON results; package versions alone do not identify editable source changes. Compare corresponding turns and the pending-write probe.
+
+Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); fewer transport constructions with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md); higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
+
+## Limits
+
+Fresh-process startup excludes interpreter launch and Azure infrastructure. The in-process client adds no network/TLS cost. Requested delays depend on OS timer resolution and are not measured service round-trip times.
+
+The fixture implements only the routes needed here. It does not validate authentication, TTL expiry, real user isolation, throttling, conditional writes, or active-turn recovery. Storage survives host reconstruction within the worker, not worker-process termination. Production transport pooling gains require a real transport and service test.
