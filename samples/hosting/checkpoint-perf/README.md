@@ -30,6 +30,12 @@ Defaults: three fresh Python processes, four turns in one conversation, one fres
 
 All constructed transports must be closed. There is no LLM/search duration to subtract. Storage interval unions must not be subtracted again from the total when reporting SDK overhead.
 
+## Graph complexity and storage calls
+
+More execution steps, tool loops, or checkpointed subgraphs can produce more checkpoint saves and pending-write operations. With similar work per operation, storage HTTP calls may grow roughly in proportion to checkpointer activity: each saver operation resolves/validates its store and reads or writes items. The relevant count is executed persistence operations, not the number of nodes defined in the graph.
+
+The ratio is not fixed. Pending-write volume, checkpoint restoration, pagination, retries, and Responses bookkeeping also affect HTTP counts. This single-node sample measures a small workload; its counts do not predict a more complex graph's traffic, and it does not establish a scaling curve. Compare checkpoint save/read and pending-write operation counts alongside actual HTTP attempts when testing a larger graph.
+
 ## Compare an SDK change
 
 The requirements install this checkout's `libs/azure-ai` package in editable mode and pin the storage/Responses/LangGraph versions used by the local baseline. On Linux/macOS, replace `.venv/Scripts/python.exe` with `.venv/bin/python` in the commands. See [results](results/RESULTS.md) for the local baseline.
