@@ -27,10 +27,18 @@ Client reuse does not change descriptor refresh/validation frequency, isolation/
 
 Deliver an SDK PR with focused tests and concise before/after results. Fewer synthetic constructions alone do not prove remote latency improvement.
 
-## Code entry points
+## Components and package boundaries
 
 Source baseline: `langchain-azure` commit `cb9db867b4e4f7dab74995254efe3332a6b6e2f5`; `azure-sdk-for-python` commit `f00fb28c5a53593d3dc74d8bebe204e27a604c7f`.
 
-- [Checkpoint saver](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py): `_get_or_create_store`, operation-level `aclose`.
-- [Conversation-chain store](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py): client construction and `async with` lifetime.
-- AgentServer core [storage/_client.py](https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_client.py): pipeline construction/ownership; `storage/_state.py`: current request headers.
+| Package / repository | Component | Expected work |
+| --- | --- | --- |
+| `langchain-azure-ai` / `langchain-azure` | Hosting [checkpoint saver](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py), `_get_or_create_store`, operation-level `aclose` | Required: borrow a compatible handler-owned client; keep metadata refresh per operation and move final resource closure to the owner. Preserve standalone saver usage. |
+| `langchain-azure-ai` / `langchain-azure` | Hosting [conversation-chain store](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py), `get`, `set`, `async with` lifetime | Required: use the same ownership rules for its own store binding; preserve mismatch validation and standalone calls. |
+| `langchain-azure-ai` / `langchain-azure` | Hosting `_responses_host.py`, `ResponsesHostServer.handle_create` | Required: establish handler scope, propagate it to graph/chain-store operations, and close owned resources after tasks settle on completion/error/cancellation. |
+| `azure-ai-agentserver-core` / `azure-sdk-for-python` | [storage/_client.py](https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_client.py), pipeline construction/`aclose`; `storage/_state.py`, constructor/`aclose`/`_request` | Conditional: add supported client/transport injection or borrowed-resource ownership if current APIs cannot express it. Verify per-call identity/headers and owned-credential cleanup even if core code stays unchanged. |
+| `azure-ai-agentserver-responses` / `azure-sdk-for-python` | Handler dispatch/lifecycle | Verification only by default. Change only if hosting cannot keep the storage scope alive through all handler work using the current contract; document that separate dependency. |
+| Both affected packages | Hosting `test_foundry_checkpoint_saver.py`, `test_resilient.py`, `test_responses_host.py`; core storage lifecycle tests | Required: shared/borrowed ownership, parallel operations, identity isolation, and closure after error/cancellation. |
+| Sample / `langchain-azure` | `benchmark.py`, `storage_transport.py`, `test_benchmark.py` | Required verification; adapt fixture injection only as needed to the supported ownership contract. Compare construction/closure counts while metadata refresh counts stay unchanged. |
+
+LangGraph execution and the storage service API need no changes by default. If core or Responses requires a new contract, deliver/release that package first, then update hosting's minimum dependency and sample requirements. Client reuse must not depend on the descriptor-reuse change.

@@ -27,10 +27,16 @@ Validating only once per handler is a separate, later optimization. It can miss 
 
 Deliver an SDK PR with focused tests and concise before/after results.
 
-## Code entry points
+## Components and package boundaries
 
 Source baseline: `langchain-azure` commit `cb9db867b4e4f7dab74995254efe3332a6b6e2f5`; `azure-sdk-for-python` commit `f00fb28c5a53593d3dc74d8bebe204e27a604c7f`.
 
-- [Checkpoint saver](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py): `_get_or_create_store`.
-- [Conversation-chain store](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py): `get`, `set`, `_validate_store`.
-- AgentServer core [storage/_state.py](https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py): `get_or_create` and fetched descriptor handling.
+| Package / repository | Component | Expected work |
+| --- | --- | --- |
+| `langchain-azure-ai` / `langchain-azure` | Hosting [checkpoint saver](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py), `_get_or_create_store` | Required: validate the descriptor already resolved by core instead of issuing the second GET. |
+| `langchain-azure-ai` / `langchain-azure` | Hosting [conversation-chain store](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py), `get`, `set`, `_validate_store` | Required: consume the resolved descriptor while preserving `on_mismatch` semantics. This is Responses bookkeeping, not application memory. |
+| `azure-ai-agentserver-core` / `azure-sdk-for-python` | [storage/_state.py](https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py), `FoundryStateStore.get_or_create`, `_fetch_properties`, `_create_properties` | Expected prerequisite at this baseline: expose the resolved descriptor through a supported, backward-compatible contract, covering fetch/create/conflict-refetch and local storage. Do not change the existing return type. |
+| Both packages | Hosting `test_foundry_checkpoint_saver.py`, `test_resilient.py`; core `tests/test_foundry_state_store.py` | Required: descriptor freshness/mismatch, reduced GET count, and unchanged lifecycle/error behavior. |
+| Sample / `langchain-azure` | `benchmark.py`, `storage_transport.py`, `test_benchmark.py` | Verification: compare metadata counts and timings; construction/closure counts must remain unchanged. Update fixture setup only if the supported core contract requires it. |
+
+Core storage/pipeline lifetime, `azure-ai-agentserver-responses`, and LangGraph require no behavior changes for this requirement. If a new core API is needed, deliver/release it first, then update hosting's `libs/azure-ai/pyproject.toml` minimum dependency and the sample requirements. Test both against that version; do not silently rely on an unreleased or private API.
