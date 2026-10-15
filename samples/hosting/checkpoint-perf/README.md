@@ -46,6 +46,14 @@ Use a small base/candidate/candidate/base sequence with separate output files an
 
 Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); fewer transport constructions with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md); higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
+## Hosted evidence and separate reliability follow-up
+
+The [migration-study PR #13](https://github.com/herohua/langgraph-foundry-migration-study/pull/13) records a 2026-10-14 cloud run with real LLM/tools bypassed and resilient on/off. Warm requests made 101-102 storage pipeline calls, including 46 metadata GETs. This supports the existing optimization targets; its graph and persistence workload differ from this sample, so counts/timings are not directly comparable and do not establish optimization savings.
+
+The run separately recorded 7/35 nonaccepted requests (20%): one service-completed client-deadline result and six other unsuccessful/incomplete requests (17.1%). Storage/task HTTP408, recovery blocking readiness and client outcome accounting require follow-up across AgentServer core/Responses, platform diagnostics and the cloud benchmark client. The exact timeout source and a causal resilient effect remain unproven.
+
+This offline transport, with Responses/task persistence kept local, cannot reproduce or establish a fix for those service failures. Keep reliability work separate from the three performance specs; preserve durability and write idempotency rather than adding blind POST/PATCH retries.
+
 ## Limits
 
 Fresh-process startup excludes interpreter launch and Azure infrastructure. The in-process client adds no network/TLS cost. Requested delays depend on OS timer resolution and are not measured service round-trip times.

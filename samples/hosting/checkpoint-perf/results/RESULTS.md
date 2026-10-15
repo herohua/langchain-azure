@@ -17,6 +17,8 @@ Completion, persisted file/TODO/message state after host reconstruction, pending
 
 These synthetic timings identify repeated descriptor reads/client construction and sequential reads; they do not estimate service latency or establish an optimization benefit. No candidate SDK was tested.
 
+Separate [hosted evidence and reliability findings](../README.md#hosted-evidence-and-separate-reliability-follow-up) reinforce the repeated-read targets. They do not change this offline baseline or demonstrate that any proposed optimization fixes cloud timeouts.
+
 More complex execution can generate more checkpoint/pending-write operations and therefore more storage HTTP calls; the relationship depends on the operation mix, not node count alone. See [graph complexity and storage calls](../README.md#graph-complexity-and-storage-calls). No scaling experiment was performed.
 
 Evidence: [source observations/events](source-baseline.json). Relevant SDK source hashes and package versions are recorded; no machine paths or credentials are included.
