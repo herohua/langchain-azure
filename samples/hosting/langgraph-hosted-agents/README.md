@@ -23,6 +23,8 @@ or deployed to Foundry with `azd`.
 
 ## Samples
 
+For an offline checkpoint/storage performance diagnostic and optimization handoff specs, see [checkpoint-perf](../checkpoint-perf/README.md). This diagnostic requires no model, credentials, or deployment.
+
 ### Responses protocol
 
 | # | Sample | Description |
