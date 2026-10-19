@@ -17,7 +17,7 @@ Completion, persisted file/TODO/message state after host reconstruction, pending
 
 These synthetic timings identify repeated descriptor reads/client construction and sequential reads; they do not estimate service latency or establish an optimization benefit. No candidate SDK was tested.
 
-The separate [2026-10-16 hosted repeat and reliability findings](../README.md#hosted-evidence-and-separate-reliability-follow-up) are now the primary cloud reference: S1/S2 failures fell to 13/2,989 (0.43%), while storage/task I/O still covered a median 96.1-99.1% of successful single-handler time. History cost persisted with fewer observed S5 storage HTTP408 attempts. These findings do not change this offline baseline, establish optimization savings, or demonstrate a cloud-timeout fix.
+Separate [hosted performance observations](../README.md#hosted-performance-observations) show storage/task I/O dominating handler time and higher latency with deeper history. They support investigating repeated reads, but do not change this offline baseline, establish optimization savings, or demonstrate a service-timeout fix.
 
 More complex execution can generate more checkpoint/pending-write operations and therefore more storage HTTP calls; the relationship depends on the operation mix, not node count alone. See [graph complexity and storage calls](../README.md#graph-complexity-and-storage-calls). No scaling experiment was performed.
 

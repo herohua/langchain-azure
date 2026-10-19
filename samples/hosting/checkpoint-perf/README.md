@@ -46,33 +46,13 @@ Use a small base/candidate/candidate/base sequence with separate output files an
 
 Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); fewer transport constructions with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md); higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
-## Hosted evidence and separate reliability follow-up
+## Hosted performance observations
 
-The [2026-10-16 repeat report](https://github.com/herohua/langgraph-foundry-migration-study/blob/4c9ba0aa5f79e15547276cc8f6138fb3cf3b9cfc/results/foundry-hosted-benchmark/2026-10-16/RESULTS.md), merged in [migration-study PR #22](https://github.com/herohua/langgraph-foundry-migration-study/pull/22), is the primary hosted reference. It replaces the smaller [2026-10-14 run](https://github.com/herohua/langgraph-foundry-migration-study/pull/13) for this discussion. Real LLM/tools were bypassed; graph, checkpoint, Responses/history and task APIs remained real. The repeat reused the same deployed SDK source (`4b5bb9b`), images and attempt budgets as 2026-10-15; no optimization, rebuild or redeployment occurred. Its workload and source differ from this offline baseline, so counts/timings are not directly comparable.
+In separate hosted measurements with real LLM/tools bypassed, logical storage/task I/O covered a median 96.1-99.1% of successful single-handler request time. Median logical call counts increased from 42-52 for empty-history requests to 102-112 for the first continuation.
 
-**Lower observed failure rate:** S1/S2 sent 2,989 requests, with 2,976 successes and 13 failures (0.43%), versus 35/2,976 failures (1.18%) on 2026-10-15. One credential error prevented a send and is separate. Success requires one completed READY terminal event and stream EOF; failures remain in the sent-request denominator and are excluded only from latency quantiles.
+Warm empty-history requests had median latency around 3-4 seconds, compared with 52-57 seconds after ten completed turns and 64-84 seconds when restoring that history in a new session. History-related overhead persisted in measurements with fewer observed storage timeouts. These observations support investigating repeated metadata/checkpoint reads, response-chain resolution and pending-write reconstruction; they do not isolate each mechanism's cost or demonstrate optimization savings.
 
-**The I/O hotspot repeated:** in successful S1/S2 traces with exactly one handler, logical storage/task I/O covered a median 96.1-99.1% of handler time. These are interval unions clipped to the handler; HTTP child spans are not added to their parents.
-
-| Group | Server resilience / request background | S1 logical calls P50 | S2 logical calls P50 |
-| --- | --- | ---: | ---: |
-| A | off / false | 42 | 102 |
-| B | on / true | 52 | 112 |
-| C | on / false | 46 | 106 |
-
-**History cost remains without the earlier timeout-heavy sample:** foreground request medians below compare A/C with request background=false. S3 uses warm compute and empty history; S4 continues ten completed turns; S5 restores that ten-turn chain in a new session on resumed compute. Counts are successful / measured requests sent.
-
-| Scenario | Resilience off P50 (success/sent) | Resilience on P50 (success/sent) |
-| --- | ---: | ---: |
-| S3: warm, empty history | 3.19 s (49/49) | 3.91 s (50/50) |
-| S4: warm, ten-turn history | 57.29 s (50/50) | 52.05 s (49/50) |
-| S5: cross-session ten-turn restore | 84.36 s (20/20) | 64.36 s (38/40) |
-
-The [per-request S5 comparison](https://github.com/herohua/langgraph-foundry-migration-study/blob/4c9ba0aa5f79e15547276cc8f6138fb3cf3b9cfc/results/foundry-hosted-benchmark/2026-10-16/data/telemetry/s5-off-comparison.json) found storage HTTP408 attempts in 8/16 successful off-mode requests on 2026-10-15, versus 0/20 on 2026-10-16. The earlier timeout-free subset had P50 72.35 s, versus 84.36 s in the repeat. Thus the overall S5 off-mode P50 drop from 156.45 to 84.36 s does not establish a performance gain. S5 reached measurement in only 84/150 attempts across all groups: 13 preparation failures and 53 admission-pause skips remained outside the measured table. These small, selected samples cannot rank resilience reliability or prove a backend fix.
-
-The repeat provides evidence with less observed timeout interference for investigating repeated metadata/checkpoint reads, response-chain resolution and pending-write reconstruction. It does not isolate their individual costs or measure client/transport reuse savings. Storage/task timeouts and client outcome accounting still need separate AgentServer core/Responses, platform and benchmark-client follow-up.
-
-This offline transport, with Responses/task persistence kept local, cannot reproduce or establish a fix for those service failures. Keep reliability work separate from the three performance specs; preserve durability and write idempotency rather than adding blind POST/PATCH retries.
+These hosted workloads differ from this offline sample. Latency summaries cover successful requests; failures, preparation failures and skipped measurements limit comparisons. The offline transport keeps Responses/task persistence local and cannot reproduce service timeouts or measure production connection-pooling gains. Keep reliability follow-up separate from the three performance specs, preserving durability and write idempotency.
 
 ## Limits
 
