@@ -44,7 +44,7 @@ Run the same script in separate base/candidate environments with identical depen
 
 Use a small base/candidate/candidate/base sequence with separate output files and identical `--turns`, `--pending-writes`, and `--delay-ms`. Do not run `uv sync` after installing a candidate: it can restore the locked baseline. Record the source commits alongside the JSON results; package versions alone do not identify editable source changes. Compare corresponding turns and the pending-write probe.
 
-Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); fewer transport constructions with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md); higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
+Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); less client or connection-pool setup with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md), measured separately for pipelines, transports and sessions; higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
 ## Hosted performance observations
 

@@ -1,69 +1,55 @@
-# Spec: Reduce Checkpoint Restoration Overhead
+# Proposal: Reduce Checkpoint Restoration Overhead
 
-Status: proposed; no implementation or measured improvement.
+Status: proposed; no implementation or measured improvement. Source links pin hosting `cb9db867`, AgentServer core `f00fb28c` and LangGraph `1.2.5`.
 
-## Goal and evidence
+## Why there are multiple `get_item()` calls
 
-First reduce sequential pending-write read latency. Checkpoint reuse is an optional follow-up, not a condition for delivering concurrent reads.
+Pending writes are task outputs saved before the next complete checkpoint. They let LangGraph retain completed work and interrupt/resume state.
 
-`_pending_writes` lists keys for the selected checkpoint, then awaits each item read sequentially and sorts by `(task_id, index)`. It does not scan all checkpoint history. The [local baseline](../results/RESULTS.md) restores 24 pending writes with 25 item GETs, one key list, and storage concurrency 1. Run the [sample](../README.md) with defaults to reproduce; `--pending-writes 105 --delay-ms 0` exercises pagination. These reads are a clear optimization target, but do not explain every source of conversation latency.
+1. [`aget_tuple()`][load] fetches one checkpoint item by ID, or lists the latest checkpoint key and then fetches that item.
+2. [`_checkpoint_tuple()` / `_pending_writes()`][writes] lists keys tagged with that checkpoint's namespace and ID. Core's [`list_keys()`][keys] returns keys, not values, so the saver calls [`get_item()`][item] once per pending write, currently in a serial loop. It then sorts records by `(task_id, index)` and deserializes their values.
+3. The normal [Responses handler][host] first calls [`detect_pending_interrupts()`][interrupts], which calls `graph.aget_state()`, then starts `graph.astream()`. LangGraph's [state inspection][graph-state] and [execution startup][graph-loop] each call the saver. They can reload the same checkpoint and its pending writes; record the actual thread/namespace/checkpoint before treating any reads as duplicates. Recovery with an existing current-response checkpoint reference skips the interrupt check.
 
-At baseline `cb9db867`, the normal host path calls `detect_pending_interrupts()` (which uses `aget_state`) before `graph.astream()`, creating a repeated-loading path. Recovery with an existing current-response checkpoint reference skips that check; recovery without a reference follows the normal path. Tracing must establish which reads actually target the same checkpoint before proposing reuse.
+For one exact checkpoint load with N available pending-write items, expect one checkpoint item GET plus N pending-write GETs, plus key-list pages and store metadata reads. The [local probe](../results/RESULTS.md) confirms 24 writes -> 25 item GETs, one key-list call and concurrency 1; 105 writes require two pages and 106 item GETs. These are logical calls without retries, not a formula for every host request.
 
-## Scope and proposed change
+In the retained local baseline, each continuation has three item GETs: one chain-store checkpoint-reference read and two reads of the same checkpoint key, with no pending-write items at that point. This confirms duplicate checkpoint loading in that workload; the separate pending-write probe measures per-item fan-out.
 
-Primary owner: `langchain-azure-ai` checkpoint saver and Responses hosting. This work can start independently of [descriptor reuse](STATE_STORE_DESCRIPTOR_REUSE.md) and [client/transport reuse](STATE_STORE_CLIENT_REUSE.md); measure the changes separately.
+[`alist()`][history] also loads each selected checkpoint and its pending writes. `_pending_writes()` itself filters one checkpoint; it does not scan all history. Chain-store lookups and response-history traversal are separate work. [`get()` metadata reads](STATE_STORE_DESCRIPTOR_REUSE.md) are also distinct from `get_item()`.
 
-### First delivery: bounded concurrent reads
+## First delivery: bounded concurrent reads
 
-Replace serial item reads within each listed page. Start with an internal limit of eight outstanding item reads per `_pending_writes()` invocation; process one page at a time. This is not a saver-wide or process-wide limit: concurrent invocations can multiply total traffic. Do not create one unbounded task per key. Preserve pagination and final `(task_id, index)` ordering. No new public option or backend batch endpoint is required.
+In `_pending_writes()`, read item values concurrently within each listed page. Start with an internal limit of eight outstanding reads per invocation; eight is an initial bound to validate, not a measured optimum. Process one page at a time and avoid one task per key across all pages. Concurrent invocations can multiply traffic; this is not a saver-wide or service-wide limit.
 
-On read failure or cancellation, cancel and await all tasks created by that invocation before closing its store. Preserve the existing exception type/propagation and cancellation behavior; task grouping must not expose a new exception wrapper. Keep missing-item handling and backend retries unchanged.
+Preserve page cursors, missing-item handling, content and final `(task_id, index)` order. On failure or cancellation, cancel and await all child reads before the caller closes the store; preserve the original error/cancellation rather than exposing an exception-group wrapper. Keep retries, writes, history/schema, identity isolation and interrupt/recovery behavior unchanged. Concurrency reduces serial waiting, not the required read count.
 
-Checkpoint writes, history retention, storage schema, and the graph's public API remain unchanged. Do not remove interrupt inspection or add cross-thread memory.
+This hosting-only change needs no new public option, backend batch API, LangGraph change or core dependency. It can ship independently of [descriptor reuse](STATE_STORE_DESCRIPTOR_REUSE.md) and [client reuse](STATE_STORE_CLIENT_REUSE.md).
 
-## Correctness constraints
+## Optional follow-up: reuse confirmed duplicate reads
 
-- Preserve pending-write content/order, checkpoint selection, user/thread isolation, write durability, interrupt/resume, and recovery semantics.
-- Retain backend retries and report throttling. Per-invocation concurrency does not cap aggregate traffic across requests.
+Trace first. Reuse only within one invocation and the same identity, thread, namespace and resolved checkpoint. A request for latest state cannot reuse an older selection without proving freshness. Do not remove interrupt inspection to save reads.
 
-### Conditional follow-up: checkpoint reuse
+Pending writes can change under the same checkpoint ID. Invalidate on `aput_writes`, `aput`, thread deletion and invocation failure/cancellation/exit; prevent an in-flight read from refilling invalidated data. Local invalidation cannot detect another writer: do not reuse mutable data unless other writers are excluded or a supported consistency check covers them.
 
-Only pursue reuse after tracing confirms duplicate reads and mutation safety can be established. Scope reuse to the invocation, identity, thread, namespace, and checkpoint selection.
+Return independent mutable state to each caller. LangGraph's [snapshot preparation][snapshot] applies pending writes to the loaded checkpoint, so inspection and execution must not receive the same mutable `CheckpointTuple`. Serialized-data reuse with independent deserialization is one option. If freshness and mutation isolation cannot be guaranteed, ship concurrent reads alone.
 
-- Invalidate on `aput_writes()`, `aput()`, deletion, and request failure/cancellation/exit. Pending writes can increase or be replaced under the same checkpoint ID, so ID equality alone is insufficient. Prevent an in-flight read from repopulating stale data after invalidation, for example with a generation check. Do not cache a whole tuple if other writers cannot be accounted for.
-- Return independently mutable state to every caller. State inspection and execution can mutate loaded checkpoints; never return the same mutable `CheckpointTuple` to both. Prefer caching serialized data and independently deserializing each return, including nested checkpoint, metadata, config, and pending-write values.
-- Add mutation-isolation, pending-write invalidation, invalidation/read-race, deletion, and request-isolation tests. If a safe integration is unavailable, deliver concurrent reads alone.
+## Components and validation
 
-## Acceptance and handoff
+| Owner | Required work |
+| --- | --- |
+| `langchain-azure-ai` saver | Change [`_pending_writes()`][writes]; verify `aget_tuple`/`alist` close the store after children settle. Extend `test_foundry_checkpoint_saver.py` for pagination, missing items, ordering, the eight-read bound, simultaneous invocations and original-error/cancellation cleanup. |
+| Hosting / LangGraph | Verify interrupt/resume and recovery paths in `test_responses_host.py` and `test_resilient.py`. For optional reuse only, trace inspection/execution and add mutation isolation, invalidation/read-race, deletion, freshness and request-isolation tests. No upstream LangGraph hook is presumed. |
+| AgentServer core | Verify concurrent [`get_item`][item] use on one client with [key pagination][keys] and actual retry attempts. No production change is expected for bounded reads. |
+| Sample | Preserve persisted file/TODO/message and pending-write checks. Add store acquisition, pagination, item-read/deserialization timings, returned bytes, logical reads versus HTTP attempts and maximum concurrency. |
 
-- Focused tests cover multiple pages, out-of-order completion, missing items, and the eight-read bound. Failure/cancellation tests prove all spawned tasks settle before store closure and the original error propagates. Cover simultaneous invocations to document the aggregate-traffic limit. Existing checkpoint round-trip and host interrupt/recovery tests must pass.
-- The harness must still verify persisted file/TODO/message state after host reconstruction and pending-write content/order. It does not test process-crash recovery.
-- Compare base/candidate in small ABBA blocks with identical dependencies and matched four-turn histories. Include the fresh-conversation control and the 24/105-write probes; compare equivalent workload positions.
-- Record store acquisition/validation, key pagination, item GET, and deserialization timings separately, plus returned serialized-data bytes. Record logical reads and actual HTTP attempts including retries, maximum concurrency, and end-to-end elapsed time. Extend instrumentation for this breakdown; the current harness does not capture every stage. Overlapping timings must not be summed as elapsed time.
-- Retain failures and throttling separately. Parallelism may reduce elapsed time without reducing HTTP count. If model/search intervals are subtracted in a service test, call the result **remaining elapsed time**: it can still contain other tool execution, writes, and queueing. The offline sample has no model/search calls.
+Compare base/candidate in ABBA order (base, candidate, candidate, base), with identical dependencies, corresponding four-turn histories, a fresh-conversation control and 24/105-write probes. Report elapsed time, storage interval union, read counts, retries, failures and throttling; do not add overlapping timings. Host reconstruction is not process-crash recovery. Claim concurrent-read and duplicate-read savings separately; no service-timeout fix is implied.
 
-Deliver an SDK PR with focused tests and a concise before/after result. Claim improvement only for measured paths; fewer duplicate reads and faster parallel reads require separate evidence.
-
-## Components and package boundaries
-
-Baseline: `langchain-azure` commit `cb9db867b4e4f7dab74995254efe3332a6b6e2f5`.
-
-### First delivery: hosting-only concurrency
-
-| Package / repository | Component | Expected work |
-| --- | --- | --- |
-| `langchain-azure-ai` / `langchain-azure` | Hosting [checkpoint saver](../../../../libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py), `_pending_writes` | Required: eight-read per-invocation bound, pagination/order preservation, and cancel-and-wait cleanup. `aget_tuple`/`alist` callers must close the store only after child reads settle. |
-| `langchain-azure-ai` / `langchain-azure` | `tests/unit_tests/agents/hosting/test_foundry_checkpoint_saver.py` | Required: concurrency, multiple pages, missing items, ordering, simultaneous invocations, and original-error/cancellation propagation. |
-| `langchain-azure-ai` / `langchain-azure` | Hosting `_responses_host.py`, `handle_create`; `_converters/_hitl.py`, `detect_pending_interrupts`; `test_responses_host.py` | Verification/tracing only for the first delivery: normal versus recovery loading paths and unchanged interrupt/resume behavior. Do not remove the check. |
-| `azure-ai-agentserver-core` / `azure-sdk-for-python` | `FoundryStateStore.list_keys`/`get_item`, async pipeline retries/transport | Compatibility verification: concurrent reads on one client and actual retry-attempt counts. No production core change or new batch API is required for the first delivery. |
-| Sample / `langchain-azure` | `benchmark.py`, `storage_transport.py`, `test_benchmark.py` | Required measurement work: stage timings, serialized byte counts, logical reads versus HTTP attempts, and concurrent-read observations. Keep instrumentation out of production behavior unless separately agreed. |
-
-No production changes to `azure-ai-agentserver-responses`, LangGraph, or the storage service are required for bounded reads. The graph's public API and SDK dependency floors remain unchanged.
-
-### Conditional follow-up: reuse across inspection and execution
-
-- **Hosting saver:** `aget_tuple`, `_checkpoint_tuple`, serialization/deserialization, `aput_writes`, `aput`, `adelete_thread`, and request-scope teardown need cache isolation/invalidation and protection against stale in-flight refill.
-- **Hosting Responses integration:** `handle_create` and pending-interrupt inspection need a shared invocation scope without changing recovery behavior. Add mutation-isolation, invalidation/race, and request-isolation tests in saver/host suites.
-- **LangGraph (`langgraph` repository):** `pregel/main.py` state inspection and execution are compatibility targets because they mutate loaded checkpoints. No upstream change is presumed. If a safe supported integration needs an upstream hook, propose it separately; its absence must not block concurrent reads.
-- **AgentServer core/Responses:** no cache implementation is presumed here. Change only if a supported lifecycle contract is missing; identify the package/version prerequisite before hosting consumes it.
+[load]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
+[writes]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L475-L537
+[history]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L237-L294
+[host]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L883-L960
+[interrupts]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_converters/_hitl.py#L115-L145
+[keys]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L549-L611
+[item]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L476-L500
+[graph-state]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/main.py#L1435-L1477
+[graph-loop]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/_loop.py#L1863-L1888
+[snapshot]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/main.py#L1350-L1371
