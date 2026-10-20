@@ -19,6 +19,10 @@ This is enough evidence to propose reducing ancestor reconstruction. It does not
 
 ## Proposed change
 
+Prioritize this deep-history path for a controlled comparison. Start the API discussion with DeepAgents, which selects the default delta-backed messages/files schemas. Two interface candidates are: an explicit opt-out from delta storage that retains equivalent reducer behavior and saves complete values at every checkpoint; or a public snapshot policy/operation that materializes selected delta channels at chosen checkpoint boundaries. These are proposed interfaces, not existing options. Materialization means losslessly storing the accumulated value, not summarizing or trimming messages/files.
+
+The existing [custom state-schema contract][schema] says to preserve the messages DeltaChannel, and files come from middleware state. Do not assume that passing a different `state_schema` alone is a supported opt-out for both. A DeepAgents option must cover messages, filesystem middleware and declarative subagents consistently, preserving message-ID/deletion and file-update semantics. Verify precompiled subagents separately.
+
 Evaluate a Foundry-backed persistence policy that materializes every initialized, persistent channel in each newly saved checkpoint, including unchanged DeltaChannels. A saved checkpoint should restore its channel state without fetching ancestor checkpoints solely to reconstruct delta history. Untracked/runtime-only values remain excluded; subgraph checkpoint namespaces retain their existing meaning.
 
 Keep `sync` durability, intermediate checkpoint saves and pending-write persistence unchanged. Recovery from any retained checkpoint must preserve task scheduling, interrupt/resume, errors, versions and pending outputs. A complete state snapshot does not replace pending writes from partially completed supersteps, and it does not imply one HTTP read for the complete tuple.
@@ -26,6 +30,8 @@ Keep `sync` durability, intermediate checkpoint saves and pending-write persiste
 Create the materialized representation while LangGraph still has the live channel state, before the existing checkpoint is persisted. Use or add a supported graph/checkpoint integration, retaining LangGraph's [serialization and version bookkeeping][create]. The [saver's `aput()`][save] receives the already-built checkpoint, which may omit DeltaChannel values; it cannot simply turn that object into a full snapshot without acquiring more state. Do not reconstruct ancestors on every save, mutate graph-private fields, add dummy `update_state()` calls or overwrite previously committed checkpoint IDs to force materialization.
 
 Lowering `snapshot_frequency` is a useful comparison, not an equivalent guarantee: [snapshot selection][cadence] is driven by each channel's updates and superstep counters. A channel not updated in a step may still be omitted at that checkpoint, even with frequency one. Snapshotting only at API completion is also a narrower alternative; it leaves arbitrary intermediate checkpoints dependent on history.
+
+Prefer a supported DeepAgents opt-out if equivalent full-value channels satisfy the every-checkpoint target without changing LangGraph. A boundary-triggered snapshot while retaining delta channels may instead need LangGraph to expose snapshot selection during checkpoint creation. Decide that integration before committing to repository changes; the saver cannot supply missing live values. Retain the API-boundary-only policy as a separately measured compromise, not as equivalent recovery behavior.
 
 ## Tradeoffs and compatibility
 
@@ -40,7 +46,7 @@ This proposal changes representation and snapshot policy, not the choice to pers
 
 The target is zero ancestor-history reads for newly materialized channels; top-level checkpoint and pending-write reads remain. The observed 102 versus two tuple loads/request identifies a large optimization opportunity, but not all excess loads have been classified. If all 100 excess loads were removable history reconstruction, that would be an illustrative 98% ceiling for tuple-load invocations, not a target or total latency estimate. The ordinary non-delta local fixture should see no benefit. Larger snapshots may offset the read saving.
 
-Estimate: 60–140 production lines in LangGraph for a supported snapshot-policy hook, 30–70 in langchain-azure for integration/validation, plus 300–600 test/fixture lines. A LangGraph release is an expected external dependency for the exact every-checkpoint policy. DeepAgents is a compatibility target; production changes there are conditional on how the policy is exposed. No core/service change is expected within item limits; large-value offload is additional scope. See [the estimate definitions](../ESTIMATES.md).
+Implementation size is TBD until the public interface is chosen; earlier LangGraph-only line ranges do not cover a DeepAgents opt-out. For that path, expect a DeepAgents configuration/schema change and release, with no LangGraph production change if existing full-value channels suffice. For triggered delta snapshots, DeepAgents configuration plus a LangGraph snapshot-policy hook/release may be needed. Hosting consumes the chosen policy; no core/service change is expected within item limits. Plan roughly 300–600 test/fixture lines for the comparison and recovery cases, then re-estimate after the contract is agreed. Large-value offload is additional scope. See [the estimate definitions](../ESTIMATES.md).
 
 The main observed case is DeepAgents 0.7.25 with default delta-backed messages/files. This is not relevant to ordinary LangChain/LangGraph graphs without delta-backed state, or to requests without a checkpointer. It also applies to custom graphs using DeltaChannel, so it is not exclusive to DeepAgents. Cosmos [already bulk-loads delta history][cosmos-history]; the read/byte tradeoff still exists, but Foundry's per-ancestor request saving does not transfer directly. Legacy delta-written history may still need reconstruction after a channel-schema change.
 
@@ -50,9 +56,9 @@ The snapshot-versus-replay tradeoff also applies to other DeltaChannel savers, i
 
 | Owner | Required work |
 | --- | --- |
-| LangGraph / hosting | Identify a supported per-checkpoint snapshot-policy integration at [checkpoint creation][create]. Keep reducers, versions, interrupts, branching/replay and current durability semantics. Release any required upstream contract before hosting consumes it. |
+| LangGraph / hosting | For opt-out, verify existing full-value channels suffice. For triggered snapshots, identify a supported integration at [checkpoint creation][create]. Keep versions, interrupts, branching/replay and durability; release any required upstream contract before hosting consumes it. |
 | FoundryCheckpointSaver | Preserve [checkpoint serialization][save], pending writes and dual-history readability; verify size failures and raw inspection. No service batch API is required for this policy. |
-| DeepAgents | Verify both messages and files, including unchanged channels, subagents and resumable tasks, against [the pinned schemas][messages]. Scope any channel-policy customization explicitly. |
+| DeepAgents | Primary API discussion: expose a supported delta opt-out or snapshot policy for messages/files and middleware/subagent schemas. Preserve reducer semantics; distinguish checkpoint materialization from context summarization. |
 | Tests / benchmark | Add a credential-free DeltaChannel graph with multiple state channels. Compare default cadence, frequency one and full materialization at matched history depths. Keep this separate from the existing simple-graph and 24/105-output probes. |
 
 Acceptance requires identical state from selected intermediate and final checkpoints, with no ancestor-history reads needed for channels in newly materialized checkpoints. Cover interrupt/resume, successful sibling-task preservation after failure, process-loss recovery, concurrent branches, old delta history, deletion/retention, cancellation and oversized states. Do not establish recovery from a successful HTTP status alone.
@@ -69,3 +75,4 @@ Measure in ABBA order with identical graphs, versions, workloads and `sync` dura
 [delta]: https://reference.langchain.com/python/langgraph/channels/delta/DeltaChannel
 [limits]: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store?tabs=python#limits
 [cosmos-history]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L272-L335
+[schema]: https://docs.langchain.com/oss/python/deepagents/context-engineering#custom-state-schema
