@@ -27,6 +27,12 @@ A duplicate task key is not enough to skip the whole batch. Repeated calls can c
 
 Before writing, serialize and check the actual service item-size limit. Define a bounded, deterministic split or legacy-format fallback for oversized batches, including retry/conflict behavior across parts. Do not silently truncate outputs or weaken isolation, TTL, errors or cancellation cleanup. No new backend batch endpoint is presumed; identify any missing supported core contract separately.
 
+## Developer inspection and representation
+
+LangGraph defines the logical pending-write interface, not a universal physical storage schema. Packing keeps that interface but changes the State Store representation: one item contains several channel outputs instead of one. Developers inspecting raw items may mistake one item for one output, miss nested channels or interpret a lower item count as missing data. Existing inspection scripts that expect top-level `channel`/`value` fields can also break.
+
+Treat this as a developer-facing format change. Before rollout, document the format version, task/checkpoint keys, nested index/channel/value mapping and separate special-channel records. Include a before/after raw-item example and show how the saver's configured serializer reconstructs the logical pending-write list. Raw values may already be serialized; do not imply that packing makes them directly readable JSON. Validate both raw inspection and saver readback. If one-item-per-output inspection is an explicit requirement, retain that format or evaluate a service batch-write API separately rather than assuming packing is acceptable.
+
 ## Read compatibility and rollout
 
 Extend [`_pending_writes()`][read] to decode both legacy single-output and packed items, flatten them, then retain the existing `(task_id, index)` ordering. Preserve serializer types, task paths and special-channel semantics. Pagination now counts stored items, not logical outputs. Thread deletion and history loading must cover both formats.
@@ -45,6 +51,7 @@ The idea also applies in principle to [CosmosDBSaver's per-output writes][cosmos
 | AgentServer core | Verify [create-only and conditional replace semantics][core-write], returned ETags and real service payload limits. No production core change is presumed. |
 | Tests | Extend `test_foundry_checkpoint_saver.py` for multiple outputs, repeated/changed/extended batches, concurrent additions, special/mixed channels, ordering, serialization, empty/oversized batches and legacy/packed coexistence. Cover committed-then-timeout, conditional conflicts and cancellation without lost durable outputs. Existing graph, interrupt/resume and recovery tests must pass. |
 | Sample | Add a multi-output-per-task probe and write/readback assertions. Record logical outputs versus physical items, requests, payload bytes and conflicts. Keep the one-output-per-task and pagination controls. The current mock rejects conditional writes; extend and test it if the candidate uses ETag merging. |
+| Documentation / inspection | Provide legacy/packed examples mapping stored items to the same logical writes. Identify affected direct-store inspection scripts and update or document their required changes; make format/version, nested outputs and special records clear. |
 
 Measure packing alone in ABBA order (base, candidate, candidate, base), with identical dependencies, histories, delays and durability. Verify the six-to-two pending-write target on the fresh path and identical restored outputs. Report extra reconciliation/chunking work, item reads, metadata calls, transports and elapsed time. Do not add savings from other proposals or claim cloud latency benefits from synthetic counts.
 
