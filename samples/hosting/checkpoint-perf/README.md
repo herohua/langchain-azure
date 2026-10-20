@@ -6,6 +6,8 @@ The mock transport replaces network/service calls with in-memory storage and con
 
 We keep the real saver methods, client construction and HTTP pipeline because those are what this diagnostic measures. Skipping storage calls or mocking the saver methods would hide repeated descriptor GETs, transport construction and serial item reads. Normal local file storage also bypasses the HTTP pipeline. This mock reproduces client-side call patterns, not service latency, network connection pooling or backend failures.
 
+See [the data-flow and request breakdown](Analysis.md) for a Mermaid overview, the 38-request continuation accounting, the separate pending-write probe and how the four proposals relate.
+
 ## Run
 
 From this sample directory:

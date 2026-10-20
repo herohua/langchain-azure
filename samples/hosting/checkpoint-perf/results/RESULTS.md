@@ -1,5 +1,7 @@
 # Local Checkpoint Performance Baseline
 
+See [Analysis.md](../Analysis.md) for the data-flow diagram, per-stage request counts and source-code walkthrough.
+
 Refreshed 2026-10-20 against upstream [langchain-azure HEAD `d6befba`](https://github.com/langchain-ai/langchain-azure/commit/d6befba95a86f55328b2e95eb61151a2f8889485), package `1.2.11`. Latest stable versions checked on PyPI: [LangGraph `1.2.16`](https://pypi.org/project/langgraph/1.2.16/), [AgentServer core `2.2.0`](https://pypi.org/project/azure-ai-agentserver-core/2.2.0/) and [Responses `2.3.0`](https://pypi.org/project/azure-ai-agentserver-responses/2.3.0/). Core/Responses were already current.
 
 Python 3.12.13 on Windows; three serial fresh processes; four conversation turns; one fresh-conversation control; 24 pending writes; requested asynchronous delay 5 ms per storage call. Uses the [sample commands and requirements](../README.md). No model, search or service calls. An isolated environment retained the previous environment's other package versions; LangGraph and the editable hosting package were updated. The four recorded saver/chain-store/core-storage source hashes are unchanged from the original baseline.
