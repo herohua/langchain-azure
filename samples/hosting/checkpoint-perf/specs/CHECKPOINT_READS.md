@@ -16,6 +16,10 @@ In the retained local baseline, each continuation has three item GETs: one chain
 
 [`alist()`][history] also loads each selected checkpoint and its pending writes. `_pending_writes()` itself filters one checkpoint; it does not scan all history. Chain-store lookups and response-history traversal are separate work. [`get()` metadata reads](STATE_STORE_DESCRIPTOR_REUSE.md) are also distinct from `get_item()`.
 
+## Cosmos DB applicability
+
+[CosmosDBSaver queries complete pending-write documents](https://github.com/langchain-ai/langchain-azure/blob/4b5bb9bcc2b5dc8bc4890675ddae05c88a1dcf71/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L659-L688), potentially across pages; it has no key-list plus per-item GET loop to parallelize. Reuse between host inspection and graph execution may still help with Cosmos DB, subject to the freshness and mutation-isolation constraints below.
+
 ## First delivery: bounded concurrent reads
 
 In `_pending_writes()`, read item values concurrently within each listed page. Start with an internal limit of eight outstanding reads per invocation; eight is an initial bound to validate, not a measured optimum. Process one page at a time and avoid one task per key across all pages. Concurrent invocations can multiply traffic; this is not a saver-wide or service-wide limit.

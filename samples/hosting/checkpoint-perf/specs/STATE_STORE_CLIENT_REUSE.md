@@ -8,6 +8,10 @@ Each [saver operation][saver] acquires a store client and closes it in `finally`
 
 The [local baseline](../results/RESULTS.md) records nine transport constructions per conversation request. The fixture measures construction/closure, not real network setup, connection-pool or token-acquisition costs. Reusing a connection can reduce setup work; remote savings remain unmeasured, and this proposal does not reduce item or metadata reads.
 
+## Cosmos DB applicability
+
+Client reuse is also relevant to Cosmos DB, but [CosmosDBSaver already reuses its container/client within the saver lifetime](https://github.com/langchain-ai/langchain-azure/blob/4b5bb9bcc2b5dc8bc4890675ddae05c88a1dcf71/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L73-L135). Avoid recreating the saver/client per request. This does not remove client setup in a separate Foundry-backed conversation-chain store.
+
 ## Proposed change
 
 Use one handler-owned scope to reuse compatible clients or their HTTP connection pool. Begin before [`build_runnable_config`][host] performs chain-store reads; keep it alive through graph work and final chain-store writes. Saver/chain-store operations borrow resources; only the scope owner closes owned resources, after all outstanding work settles on success, failure or cancellation. Preserve standalone use outside a host.

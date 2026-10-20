@@ -12,6 +12,10 @@ A descriptor holds store settings such as user isolation and item time-to-live (
 
 The [local baseline](../results/RESULTS.md) records 18 descriptor GETs and nine transport constructions per conversation request. These metadata reads are not `get_item()` calls.
 
+## Cosmos DB applicability
+
+This duplicate metadata-fetch pattern does not apply to the [CosmosDBSaver implementation](https://github.com/langchain-ai/langchain-azure/blob/4b5bb9bcc2b5dc8bc4890675ddae05c88a1dcf71/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L73-L135): database/container setup happens when the saver is created. A Foundry-backed conversation-chain store still benefits independently of the chosen checkpointer.
+
 ## Proposed change
 
 Expose the descriptor resolved by core through a supported, backward-compatible accessor, then use it for hosting validation. Capture the server result on fetch, create and create-conflict/refetch paths, and provide equivalent local-backend behavior. Do not change `get_or_create`'s return type or read private fields.
