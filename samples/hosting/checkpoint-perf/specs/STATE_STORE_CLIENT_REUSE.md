@@ -1,12 +1,12 @@
 # Proposal: Reuse State-Store Clients and Transports
 
-Status: proposed; no implementation or measured improvement. Source links pin the local baseline: hosting `cb9db867`, AgentServer core `f00fb28c`.
+Status: proposed; no implementation or measured improvement. Source links pin the local baseline: hosting `d6befba`, AgentServer core `f00fb28c`.
 
 ## Current behavior
 
 Each [saver operation][saver] acquires a store client and closes it in `finally`. Each [conversation-chain read/write][chain] similarly creates a client and closes it through `async with`. Core's [`get_or_create`][state] constructs a new store-bound client each time; [`FoundryStorageClient`][client] constructs its HTTP pipeline, and `aclose()` closes that pipeline.
 
-The [local baseline](../results/RESULTS.md) records nine transport constructions per conversation request. The fixture measures construction/closure, not real network setup, connection-pool or token-acquisition costs. Reusing a connection can reduce setup work; remote savings remain unmeasured, and this proposal does not reduce item or metadata reads.
+The [local baseline](../results/RESULTS.md) records nine transport constructions for first/fresh-conversation requests and ten for continuations. The fixture measures construction/closure, not real network setup, connection-pool or token-acquisition costs. Reusing a connection can reduce setup work; remote savings remain unmeasured, and this proposal does not reduce item or metadata reads.
 
 ## Cosmos DB applicability
 
@@ -36,9 +36,9 @@ Compare the client-only change in ABBA order (base, candidate, candidate, base),
 
 No LangGraph or service API change is expected. If a new core/Responses contract is required, release it before updating hosting's dependency floor and sample requirements. Measure each proposal separately, or report its incremental effect explicitly.
 
-[saver]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
-[chain]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py#L179-L235
-[host]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L870-L976
+[saver]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
+[chain]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py#L179-L235
+[host]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L870-L976
 [state]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L158-L317
 [client]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_client.py#L55-L99
 [headers]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L215-L240

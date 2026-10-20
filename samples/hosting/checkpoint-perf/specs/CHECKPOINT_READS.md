@@ -1,6 +1,6 @@
 # Proposal: Reduce Checkpoint Restoration Overhead
 
-Status: proposed; no implementation or measured improvement. Source links pin hosting `cb9db867`, AgentServer core `f00fb28c` and LangGraph `1.2.5`.
+Status: proposed; no implementation or measured improvement. Source links pin hosting `d6befba`, AgentServer core `f00fb28c` and LangGraph `1.2.16`.
 
 ## Why there are multiple `get_item()` calls
 
@@ -8,11 +8,11 @@ Pending writes are task outputs saved before the next complete checkpoint. They 
 
 1. [`aget_tuple()`][load] fetches one checkpoint item by ID, or lists the latest checkpoint key and then fetches that item.
 2. [`_checkpoint_tuple()` / `_pending_writes()`][writes] lists keys tagged with that checkpoint's namespace and ID. Core's [`list_keys()`][keys] returns keys, not values, so the saver calls [`get_item()`][item] once per pending write, currently in a serial loop. It then sorts records by `(task_id, index)` and deserializes their values.
-3. The normal [Responses handler][host] first calls [`detect_pending_interrupts()`][interrupts], which calls `graph.aget_state()`, then starts `graph.astream()`. LangGraph's [state inspection][graph-state] and [execution startup][graph-loop] each call the saver. They can reload the same checkpoint and its pending writes; record the actual thread/namespace/checkpoint before treating any reads as duplicates. Recovery with an existing current-response checkpoint reference skips the interrupt check.
+3. The normal [Responses handler][host] first calls [`detect_pending_interrupts()`][interrupts], which calls `graph.aget_state()`, then starts `graph.astream()`. LangGraph's [state inspection][graph-state] and [execution startup][graph-loop] each call the saver. They can reload the same checkpoint and its pending writes; record the actual thread/namespace/checkpoint before treating any reads as duplicates. LangGraph 1.2.16 also [checks whether an explicitly addressed checkpoint has been superseded][superseded] by loading the latest checkpoint. Recovery with an existing current-response checkpoint reference skips the interrupt check, but can still need the latest-checkpoint check.
 
 For one exact checkpoint load with N available pending-write items, expect one checkpoint item GET plus N pending-write GETs, plus key-list pages and store metadata reads. The [local probe](../results/RESULTS.md) confirms 24 writes -> 25 item GETs, one key-list call and concurrency 1; 105 writes require two pages and 106 item GETs. These are logical calls without retries, not a formula for every host request.
 
-In the retained local baseline, each continuation has three item GETs: one chain-store checkpoint-reference read and two reads of the same checkpoint key, with no pending-write items at that point. This confirms duplicate checkpoint loading in that workload; the separate pending-write probe measures per-item fan-out.
+In the refreshed local baseline, each continuation has four item GETs: one chain-store checkpoint-reference read and three reads of the same checkpoint key, with no pending-write items at that point. The reads serve interrupt inspection, execution loading and a latest-checkpoint check. The separate pending-write probe measures per-item fan-out.
 
 [`alist()`][history] also loads each selected checkpoint and its pending writes. `_pending_writes()` itself filters one checkpoint; it does not scan all history. Chain-store lookups and response-history traversal are separate work. [`get()` metadata reads](STATE_STORE_DESCRIPTOR_REUSE.md) are also distinct from `get_item()`.
 
@@ -30,7 +30,7 @@ This hosting-only change needs no new public option, backend batch API, LangGrap
 
 ## Optional follow-up: reuse confirmed duplicate reads
 
-Trace first. Reuse only within one invocation and the same identity, thread, namespace and resolved checkpoint. A request for latest state cannot reuse an older selection without proving freshness. Do not remove interrupt inspection to save reads.
+Trace first. Reuse only within one invocation and the same identity, thread, namespace and resolved checkpoint. A request for latest state cannot reuse an older selection without proving freshness. Preserve the superseded-checkpoint check; equality in this fixture does not justify replacing a latest lookup with an addressed checkpoint. Do not remove interrupt inspection to save reads.
 
 Pending writes can change under the same checkpoint ID. Invalidate on `aput_writes`, `aput`, thread deletion and invocation failure/cancellation/exit; prevent an in-flight read from refilling invalidated data. Local invalidation cannot detect another writer: do not reuse mutable data unless other writers are excluded or a supported consistency check covers them.
 
@@ -47,13 +47,14 @@ Return independent mutable state to each caller. LangGraph's [snapshot preparati
 
 Compare base/candidate in ABBA order (base, candidate, candidate, base), with identical dependencies, corresponding four-turn histories, a fresh-conversation control and 24/105-write probes. Report elapsed time, storage interval union, read counts, retries, failures and throttling; do not add overlapping timings. Host reconstruction is not process-crash recovery. Claim concurrent-read and duplicate-read savings separately; no service-timeout fix is implied.
 
-[load]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
-[writes]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L475-L537
-[history]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L237-L294
-[host]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L883-L960
-[interrupts]: https://github.com/langchain-ai/langchain-azure/blob/cb9db867b4e4f7dab74995254efe3332a6b6e2f5/libs/azure-ai/langchain_azure_ai/agents/hosting/_converters/_hitl.py#L115-L145
+[load]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
+[writes]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L475-L537
+[history]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L237-L294
+[host]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L883-L960
+[interrupts]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_converters/_hitl.py#L115-L145
 [keys]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L549-L611
 [item]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L476-L500
-[graph-state]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/main.py#L1435-L1477
-[graph-loop]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/_loop.py#L1863-L1888
-[snapshot]: https://github.com/langchain-ai/langgraph/blob/7ab79f9f3e94fb4357334d902f5fd69ec0088eb4/libs/langgraph/langgraph/pregel/main.py#L1350-L1371
+[graph-state]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/main.py#L1489-L1512
+[graph-loop]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_loop.py#L2061-L2090
+[snapshot]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/main.py#L1425-L1443
+[superseded]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_checkpoint.py#L175-L200

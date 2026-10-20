@@ -42,6 +42,8 @@ The ratio is not fixed. Pending-write volume, checkpoint restoration, pagination
 
 The requirements install this checkout's `libs/azure-ai` package in editable mode and pin the storage/Responses/LangGraph versions used by the local baseline. On Linux/macOS, replace `.venv/Scripts/python.exe` with `.venv/bin/python` in the commands. See [results](results/RESULTS.md) for the local baseline.
 
+The 2026-10-20 refresh uses upstream hosting `d6befba` (`1.2.11`), LangGraph `1.2.16`, AgentServer core `2.2.0` and Responses `2.3.0`. All three call-pattern issues remain. Continuations now make an extra latest-checkpoint lookup; see the [updated counts and explanation](results/RESULTS.md#what-changed).
+
 Run the same script in separate base/candidate environments with identical dependencies except the SDK change. Use the Python executable from each environment; the script imports whichever SDK that interpreter resolves. Install another source checkout with `python -m uv pip install --python <python-executable> --no-deps --editable <checkout>/libs/azure-ai`. AgentServer core changes require installing that package into the same environment too.
 
 Use a small base/candidate/candidate/base sequence with separate output files and identical `--turns`, `--pending-writes`, and `--delay-ms`. Do not run `uv sync` after installing a candidate: it can restore the locked baseline. Record the source commits alongside the JSON results; package versions alone do not identify editable source changes. Compare corresponding turns and the pending-write probe.
