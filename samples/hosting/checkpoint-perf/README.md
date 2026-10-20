@@ -50,13 +50,15 @@ Use a small base/candidate/candidate/base sequence with separate output files an
 
 Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); less client or connection-pool setup with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md), measured separately for pipelines, transports and sessions; higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
+A fourth proposal, [pending-write packing](specs/PENDING_WRITE_PACKING.md), targets six-to-two item writes for the two multi-output tasks in this fixture. It changes stored format and requires separate compatibility and idempotency validation; the current benchmark has not implemented or measured it.
+
 ## Hosted performance observations
 
 In separate hosted measurements with real LLM/tools bypassed, logical storage/task I/O covered a median 96.1-99.1% of successful single-handler request time. Median logical call counts increased from 42-52 for empty-history requests to 102-112 for the first continuation.
 
 Warm empty-history requests had median latency around 3-4 seconds, compared with 52-57 seconds after ten completed turns and 64-84 seconds when restoring that history in a new session. History-related overhead persisted in measurements with fewer observed storage timeouts. These observations support investigating repeated metadata/checkpoint reads, response-chain resolution and pending-write reconstruction; they do not isolate each mechanism's cost or demonstrate optimization savings.
 
-These hosted workloads differ from this offline sample. Latency summaries cover successful requests; failures, preparation failures and skipped measurements limit comparisons. The offline transport keeps Responses/task persistence local and cannot reproduce service timeouts or measure production connection-pooling gains. Keep reliability follow-up separate from the three performance specs, preserving durability and write idempotency.
+These hosted workloads differ from this offline sample. Latency summaries cover successful requests; failures, preparation failures and skipped measurements limit comparisons. The offline transport keeps Responses/task persistence local and cannot reproduce service timeouts or measure production connection-pooling gains. Keep reliability follow-up separate from the performance specs, preserving durability and write idempotency.
 
 ## Limits
 
