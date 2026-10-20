@@ -1,8 +1,10 @@
 # Local Checkpoint Performance Example
 
-A deterministic graph runs through the public `ResponsesHostServer`, `FoundryCheckpointSaver`, conversation-chain store, and real Azure storage HTTP pipeline. No model, search, Azure credentials, deployment, or service calls are needed.
+A deterministic graph runs through the public `ResponsesHostServer`, `FoundryCheckpointSaver`, conversation-chain store, and the SDK's storage HTTP pipeline with a mock transport. No model, search, Azure credentials, deployment, or service calls are needed.
 
-The storage transport is an offline fixture with configurable asynchronous delay. Normal local file storage bypasses the HTTP pipeline, so it cannot expose repeated descriptor GETs or transport construction. This fixture selects the storage HTTP path while keeping the host's response/task persistence local. SDK checkpoint and hosting code are unchanged.
+The mock transport replaces network/service calls with in-memory storage and configurable asynchronous delay. The harness selects the SDK's HTTP storage path and injects this transport; the host's response/task persistence stays local. SDK checkpoint and hosting source code is unchanged.
+
+We keep the real saver methods, client construction and HTTP pipeline because those are what this diagnostic measures. Skipping storage calls or mocking the saver methods would hide repeated descriptor GETs, transport construction and serial item reads. Normal local file storage also bypasses the HTTP pipeline. This mock reproduces client-side call patterns, not service latency, network connection pooling or backend failures.
 
 ## Run
 
