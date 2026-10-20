@@ -1,0 +1,80 @@
+FFF.F.F.F.                                                               [100%]
+================================== FAILURES ===================================
+_ test_reuses_each_acquisition_descriptor_and_revalidates[user_isolation-False] _
+..\regression\test_foundry_checkpoint_saver.py:456: in test_reuses_each_acquisition_descriptor_and_revalidates
+    assert await saver.aget_tuple(_config()) is None
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs\azure-ai\langchain_azure_ai\agents\hosting\_foundry_checkpoint_saver.py:174: in aget_tuple
+    store = await self._get_or_create_store(thread_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs\azure-ai\langchain_azure_ai\agents\hosting\_foundry_checkpoint_saver.py:444: in _get_or_create_store
+    properties = await store.get()
+                 ^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+_ test_reuses_each_acquisition_descriptor_and_revalidates[item_ttl_seconds-600] _
+..\regression\test_foundry_checkpoint_saver.py:456: in test_reuses_each_acquisition_descriptor_and_revalidates
+    assert await saver.aget_tuple(_config()) is None
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs\azure-ai\langchain_azure_ai\agents\hosting\_foundry_checkpoint_saver.py:174: in aget_tuple
+    store = await self._get_or_create_store(thread_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+libs\azure-ai\langchain_azure_ai\agents\hosting\_foundry_checkpoint_saver.py:444: in _get_or_create_store
+    properties = await store.get()
+                 ^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+_ test_chain_reuses_fresh_acquisition_descriptor[user_isolation-True-get-fail] _
+..\regression\test_resilient.py:431: in test_chain_reuses_fresh_acquisition_descriptor
+    await store.get("chain-1", "missing")
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:192: in get
+    await self._validate_store(state_store)
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:147: in _validate_store
+    properties = await state_store.get()
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+_ test_chain_reuses_fresh_acquisition_descriptor[user_isolation-True-set-fail] _
+..\regression\test_resilient.py:431: in test_chain_reuses_fresh_acquisition_descriptor
+    await store.get("chain-1", "missing")
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:192: in get
+    await self._validate_store(state_store)
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:147: in _validate_store
+    properties = await state_store.get()
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+_ test_chain_reuses_fresh_acquisition_descriptor[item_ttl_seconds-600-get-fail] _
+..\regression\test_resilient.py:431: in test_chain_reuses_fresh_acquisition_descriptor
+    await store.get("chain-1", "missing")
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:192: in get
+    await self._validate_store(state_store)
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:147: in _validate_store
+    properties = await state_store.get()
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+_ test_chain_reuses_fresh_acquisition_descriptor[item_ttl_seconds-600-set-fail] _
+..\regression\test_resilient.py:431: in test_chain_reuses_fresh_acquisition_descriptor
+    await store.get("chain-1", "missing")
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:192: in get
+    await self._validate_store(state_store)
+libs\azure-ai\langchain_azure_ai\agents\hosting\_responses\conversation_chain_store.py:147: in _validate_store
+    properties = await state_store.get()
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\unittest\mock.py:2291: in _execute_mock_call
+    raise effect
+E   AssertionError: duplicate descriptor GET
+=========================== short test summary info ===========================
+FAILED ..\regression\test_foundry_checkpoint_saver.py::test_reuses_each_acquisition_descriptor_and_revalidates[user_isolation-False]
+FAILED ..\regression\test_foundry_checkpoint_saver.py::test_reuses_each_acquisition_descriptor_and_revalidates[item_ttl_seconds-600]
+FAILED ..\regression\test_resilient.py::test_chain_reuses_fresh_acquisition_descriptor[user_isolation-True-get-fail]
+FAILED ..\regression\test_resilient.py::test_chain_reuses_fresh_acquisition_descriptor[user_isolation-True-set-fail]
+FAILED ..\regression\test_resilient.py::test_chain_reuses_fresh_acquisition_descriptor[item_ttl_seconds-600-get-fail]
+FAILED ..\regression\test_resilient.py::test_chain_reuses_fresh_acquisition_descriptor[item_ttl_seconds-600-set-fail]
+6 failed, 4 passed, 54 deselected in 1.85s

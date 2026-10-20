@@ -441,7 +441,9 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
             get_server_version=get_user_agent,
         )
         try:
-            properties = await store.get()
+            properties = getattr(store, "resolved_descriptor", None)
+            if properties is None:
+                properties = await store.get()
             if properties.user_isolation != self._user_isolation:
                 raise ValueError(
                     f"State store {store.name!r} already exists with "

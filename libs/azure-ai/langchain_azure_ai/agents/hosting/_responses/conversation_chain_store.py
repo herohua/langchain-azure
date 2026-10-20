@@ -144,7 +144,9 @@ class FoundryConversationChainStore:
     async def _validate_store(self, state_store: FoundryStateStore) -> None:
         if self._on_mismatch == "ignore":
             return
-        properties = await state_store.get()
+        properties = getattr(state_store, "resolved_descriptor", None)
+        if properties is None:
+            properties = await state_store.get()
         if properties.user_isolation != self._user_isolation:
             raise ValueError(
                 f"State store {state_store.name!r} already exists with "
