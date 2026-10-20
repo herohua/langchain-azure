@@ -5,15 +5,23 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from azure.ai.agentserver.core import (
+    FoundryAgentRequestContext,
+    reset_request_context,
+    set_request_context,
+)
 from azure.core.credentials_async import AsyncTokenCredential
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from typing_extensions import TypedDict
 
 from langchain_azure_ai._user_agent import get_user_agent
@@ -423,3 +431,362 @@ async def test_close_closes_owned_default_credential() -> None:
         await saver.aclose()
 
     credential.close.assert_awaited_once()
+
+
+@pytest.fixture
+def reuse_saver() -> Any:
+    store = _FakeStateStore()
+    lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def exclusive_access() -> Any:
+        async with lock:
+            yield True
+
+    with patch(
+        "langchain_azure_ai.agents.hosting._foundry_checkpoint_saver."
+        "FoundryStateStore.get_or_create",
+        new=AsyncMock(return_value=store),
+    ):
+        saver = FoundryCheckpointSaver(_credential(), exclusive_access=exclusive_access)
+        yield saver, store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 105])
+async def test_request_scope_reuses_current_checkpoint_and_isolates_mutations(
+    reuse_saver: Any,
+    count: int,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    for index in range(count):
+        await saver.aput_writes(
+            config, [("value", {"items": [1]})], f"task-{index:03d}"
+        )
+    with patch.object(store, "get_item", wraps=store.get_item) as get_item:
+        async with saver._request_scope():
+            first = await saver.aget_tuple(config)
+            first.checkpoint["channel_values"]["messages"].append("changed")
+            first.pending_writes[0][2]["items"].append(2)
+            second = await saver.aget_tuple(config)
+            latest = await saver.aget_tuple(_config())
+            assert second == latest
+            assert latest.checkpoint["channel_values"]["messages"] == ["first"]
+            assert latest.pending_writes == [
+                (f"task-{index:03d}", "value", {"items": [1]}) for index in range(count)
+            ]
+            assert get_item.await_count == count + 1
+        await saver.aget_tuple(config)
+        assert get_item.await_count == 2 * (count + 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [None, False])
+async def test_no_ownership_keeps_normal_reads(owned: bool | None) -> None:
+    @asynccontextmanager
+    async def unavailable() -> Any:
+        yield False
+
+    store = _FakeStateStore()
+    saver = FoundryCheckpointSaver(
+        _credential(), exclusive_access=unavailable if owned is False else None
+    )
+    with patch.object(saver, "_get_or_create_store", AsyncMock(return_value=store)):
+        config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+        with patch.object(store, "get_item", wraps=store.get_item) as read:
+            async with saver._request_scope():
+                await saver.aget_tuple(config)
+                await saver.aget_tuple(config)
+            assert read.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latest_first", [False, True])
+async def test_stale_reference_keeps_latest_selection_distinct(
+    reuse_saver: Any, latest_first: bool
+) -> None:
+    saver, _ = reuse_saver
+    old = await saver.aput(_config(), _checkpoint("old", "old"), {}, {})
+    current = await saver.aput(old, _checkpoint("new", "new"), {}, {})
+    async with saver._request_scope():
+        if latest_first:
+            assert (await saver.aget_tuple(_config())).config == current
+        assert (await saver.aget_tuple(old)).config == old
+        assert (await saver.aget_tuple(_config())).config == current
+        assert saver._active_read_scope().enabled is False
+
+
+@pytest.mark.asyncio
+async def test_identity_thread_namespace_and_request_isolation(
+    reuse_saver: Any,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    with patch.object(store, "get_item", wraps=store.get_item) as read:
+        async with saver._request_scope():
+            await saver.aget_tuple(config)
+            token = set_request_context(FoundryAgentRequestContext(user_id="other"))
+            try:
+                await saver.aget_tuple(config)
+                assert read.await_count == 2
+            finally:
+                reset_request_context(token)
+        async with saver._request_scope():
+            assert await saver.aget_tuple(_config(checkpoint_ns="other")) is None
+        async with saver._request_scope():
+            assert await saver.aget_tuple({"configurable": {"thread_id": "empty"}})
+            assert read.await_count == 3
+        await saver.aget_tuple(config)
+        await saver.aget_tuple(config)
+        assert read.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_mutations_invalidate_before_persistence_and_after_failure(
+    reuse_saver: Any,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    async with saver._request_scope():
+        await saver.aget_tuple(config)
+        await saver.aput_writes(config, [("value", 1)], "task")
+        assert (await saver.aget_tuple(config)).pending_writes == [("task", "value", 1)]
+        newer = await saver.aput(config, _checkpoint("c2", "second"), {}, {})
+        assert (await saver.aget_tuple(_config())).config == newer
+        with (
+            patch.object(
+                store, "set_item", AsyncMock(side_effect=RuntimeError("failed"))
+            ),
+            pytest.raises(RuntimeError, match="failed"),
+        ):
+            await saver.aput(newer, _checkpoint("c3", "third"), {}, {})
+        assert saver._active_read_scope().data is None
+        assert saver._active_read_scope().enabled is False
+        assert (await saver.aget_tuple(_config())).config == newer
+    async with saver._request_scope():
+        await saver.aget_tuple(_config())
+        with patch.object(saver, "_bound_store", return_value=store):
+            await saver.adelete_thread("thread-1")
+        assert await saver.aget_tuple(_config()) is None
+
+
+@pytest.mark.asyncio
+async def test_read_race_cannot_refill_invalidated_cache(reuse_saver: Any) -> None:
+    saver, _ = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = saver._checkpoint_tuple
+
+    async def pause(*args: Any) -> Any:
+        result = await original(*args)
+        entered.set()
+        await release.wait()
+        return result
+
+    async with saver._request_scope():
+        with patch.object(saver, "_checkpoint_tuple", pause):
+            read = asyncio.create_task(saver.aget_tuple(config))
+            await entered.wait()
+            await saver.aput_writes(config, [("value", 1)], "task")
+            release.set()
+            await read
+        assert saver._active_read_scope().data is None
+        assert (await saver.aget_tuple(config)).pending_writes == [("task", "value", 1)]
+
+
+@pytest.mark.asyncio
+async def test_partial_write_failure_reloads_persisted_outputs(
+    reuse_saver: Any,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    create = store.create_item
+
+    async def fail_second(key: str, *args: Any, **kwargs: Any) -> Any:
+        if key.endswith("/1"):
+            raise RuntimeError("partial write")
+        return await create(key, *args, **kwargs)
+
+    async with saver._request_scope():
+        await saver.aget_tuple(config)
+        with (
+            patch.object(store, "create_item", fail_second),
+            pytest.raises(RuntimeError, match="partial write"),
+        ):
+            await saver.aput_writes(config, [("first", 1), ("second", 2)], "task")
+        assert (await saver.aget_tuple(config)).pending_writes == [("task", "first", 1)]
+
+
+@pytest.mark.asyncio
+async def test_read_during_mutation_does_not_cache_partial_state(
+    reuse_saver: Any,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    entered, release = asyncio.Event(), asyncio.Event()
+    create = store.create_item
+
+    async def blocked(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await create(*args, **kwargs)
+
+    async with saver._request_scope():
+        await saver.aget_tuple(config)
+        with patch.object(store, "create_item", blocked):
+            writer = asyncio.create_task(
+                saver.aput_writes(config, [("value", 1)], "task")
+            )
+            await entered.wait()
+            assert (await saver.aget_tuple(config)).pending_writes == []
+            assert saver._active_read_scope().data is None
+            release.set()
+            await writer
+        assert (await saver.aget_tuple(config)).pending_writes == [("task", "value", 1)]
+
+
+@pytest.mark.asyncio
+async def test_read_failure_disables_reuse_for_scope(reuse_saver: Any) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    async with saver._request_scope():
+        with (
+            patch.object(
+                store, "get_item", AsyncMock(side_effect=RuntimeError("read failed"))
+            ),
+            pytest.raises(RuntimeError, match="read failed"),
+        ):
+            await saver.aget_tuple(config)
+        assert saver._active_read_scope().data is None
+        assert saver._active_read_scope().enabled is False
+        assert store.closed
+        assert await saver.aget_tuple(config) is not None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_failure_and_inherited_scope_cleanup(
+    reuse_saver: Any,
+) -> None:
+    saver, store = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    entered = asyncio.Event()
+
+    async def blocked(*args: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    with pytest.raises(RuntimeError, match="request failed"):
+        async with saver._request_scope():
+            scope = saver._active_read_scope()
+            with patch.object(store, "get_item", blocked):
+                read = asyncio.create_task(saver.aget_tuple(config))
+                await entered.wait()
+                read.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await read
+            assert scope.data is None
+            assert scope.enabled is False
+            assert store.closed
+            raise RuntimeError("request failed")
+    assert scope.active is False
+    release = asyncio.Event()
+    async with saver._request_scope():
+        await saver.aget_tuple(config)
+
+        async def inherited() -> None:
+            await release.wait()
+            assert saver._active_read_scope() is None
+            await saver.aget_tuple(config)
+
+        child = asyncio.create_task(inherited())
+    release.set()
+    await child
+    assert saver._active_read_scope() is None
+
+
+@pytest.mark.asyncio
+async def test_request_ownership_blocks_other_writers(reuse_saver: Any) -> None:
+    saver, _ = reuse_saver
+    config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def owner() -> None:
+        async with saver._request_scope():
+            entered.set()
+            await release.wait()
+
+    request = asyncio.create_task(owner())
+    await entered.wait()
+    writer = asyncio.create_task(saver.aput_writes(config, [("value", 1)], "task"))
+    await asyncio.sleep(0)
+    assert writer.done() is False
+    release.set()
+    await request
+    await writer
+
+
+@pytest.mark.asyncio
+async def test_reuse_preserves_interrupt_resume_and_update_state(
+    reuse_saver: Any,
+) -> None:
+    saver, _ = reuse_saver
+
+    async def ask(state: _GraphState) -> _GraphState:
+        return {"value": interrupt("Approve?")}
+
+    builder = StateGraph(_GraphState)
+    builder.add_node("ask", ask)
+    builder.add_edge(START, "ask")
+    builder.add_edge("ask", END)
+    graph = builder.compile(checkpointer=saver)
+    async with saver._request_scope():
+        await graph.ainvoke({"value": 1}, _config(), durability="sync")
+    async with saver._request_scope():
+        state = await graph.aget_state(_config())
+        assert state.tasks[0].interrupts[0].value == "Approve?"
+        assert (
+            await graph.ainvoke(Command(resume=2), state.config, durability="sync")
+        )["value"] == 2
+    async with saver._request_scope():
+        await graph.aget_state(_config())
+        await graph.aupdate_state(_config(), {"value": 3})
+        assert (await graph.aget_state(_config())).values == {"value": 3}
+
+
+@pytest.mark.asyncio
+async def test_recovery_from_superseded_checkpoint_keeps_remaining_work(
+    reuse_saver: Any,
+) -> None:
+    saver, _ = reuse_saver
+    calls = []
+
+    async def first(state: _GraphState) -> _GraphState:
+        calls.append("first")
+        return {"value": 2}
+
+    async def second(state: _GraphState) -> _GraphState:
+        calls.append("second")
+        return {"value": 3}
+
+    builder = StateGraph(_GraphState)
+    builder.add_node("first", first)
+    builder.add_node("second", second)
+    builder.add_edge(START, "first")
+    builder.add_edge("first", "second")
+    builder.add_edge("second", END)
+    graph = builder.compile(checkpointer=saver)
+    saved: RunnableConfig | None = None
+    async for event in graph.astream(
+        {"value": 1}, _config(), stream_mode=["checkpoints"], durability="sync"
+    ):
+        _, checkpoint = cast(tuple[str, dict[str, Any]], event)
+        if checkpoint["next"] == ["second"]:
+            saved = checkpoint["config"]
+    assert saved is not None
+    calls.clear()
+    async with saver._request_scope():
+        result = await graph.ainvoke(None, saved, durability="sync")
+        assert saver._active_read_scope().enabled is False
+    assert result == {"value": 3}
+    assert calls == ["second"]

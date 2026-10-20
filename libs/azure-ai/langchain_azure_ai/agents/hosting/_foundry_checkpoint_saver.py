@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from azure.ai.agentserver.core import get_request_context
 from azure.ai.agentserver.core.storage import (
     FoundryStateStore,
     FoundryStorageConflictError,
@@ -108,6 +112,21 @@ class _PendingWriteItemTags(TypedDict):
     ckpt: str
 
 
+@dataclass
+class _CheckpointReadScope:
+    active: bool = True
+    enabled: bool = True
+    generation: int = 0
+    mutations: int = 0
+    key: tuple[str | None, ...] | None = None
+    data: tuple[str, bytes] | None = None
+
+    def invalidate(self) -> None:
+        self.generation += 1
+        self.key = None
+        self.data = None
+
+
 class FoundryCheckpointSaver(BaseCheckpointSaver):
     """Persist LangGraph checkpoints in Microsoft Foundry state stores.
 
@@ -127,6 +146,24 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
             first created. ``-1`` disables expiration.
         api_version: Foundry storage API version.
         serde: Optional LangGraph serializer.
+        exclusive_access: Optional factory for an async ownership context.
+            Yield ``True`` only while all writers to this saver's stores are
+            excluded, including other processes, recovery and state updates.
+            The context must fail the request on ownership loss and prevent
+            stale writes, for example through fencing. ``ResponsesHostServer``
+            holds it from reference selection through the final reference
+            update. Standalone saver mutations also acquire it. Yield ``False``
+            when ownership is unavailable to retain ordinary reads and writes.
+            Such writers must still be excluded from any context yielding
+            ``True``. Ownership exceptions propagate to the caller.
+            Defaults to ``None`` (no read reuse); a process-local lock is only
+            sufficient when storage has no writers in other processes.
+
+    Example:
+        Supply a deployment's existing ownership context::
+
+            saver = FoundryCheckpointSaver(exclusive_access=storage_write_lease)
+            host = ResponsesHostServer(builder.compile(checkpointer=saver))
     """
 
     def __init__(
@@ -139,6 +176,7 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
         item_ttl_seconds: int = DEFAULT_ITEM_TTL_SECONDS,
         api_version: str = "v1",
         serde: SerializerProtocol | None = None,
+        exclusive_access: Callable[[], AbstractAsyncContextManager[bool]] | None = None,
     ) -> None:
         super().__init__(serde=serde)
         if not store_name_prefix:
@@ -155,6 +193,10 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
         self._user_isolation = user_isolation
         self._item_ttl_seconds = item_ttl_seconds
         self._api_version = api_version
+        self._exclusive_access = exclusive_access
+        self._read_scope: ContextVar[_CheckpointReadScope | None] = ContextVar(
+            f"foundry_checkpoint_reads_{id(self)}", default=None
+        )
 
     async def __aenter__(self) -> FoundryCheckpointSaver:
         return self
@@ -170,6 +212,98 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Fetch an exact checkpoint or the latest checkpoint in a namespace."""
+        scope = self._active_read_scope()
+        if scope is None or not scope.enabled or scope.mutations:
+            return await self._load_tuple(config)
+        thread_id, checkpoint_ns = self._thread_and_namespace(config)
+        identity = get_request_context()
+        key = (
+            identity.user_id,
+            identity.call_id,
+            identity.session_id,
+            thread_id,
+            checkpoint_ns,
+        )
+        checkpoint_id = get_checkpoint_id(config)
+        generation = scope.generation
+        try:
+            if scope.key != key or scope.data is None:
+                # An exact ID does not establish freshness for a latest query.
+                latest = await self._load_tuple(
+                    self._config(thread_id, checkpoint_ns, "")
+                )
+                if latest is None or (
+                    checkpoint_id and get_checkpoint_id(latest.config) != checkpoint_id
+                ):
+                    scope.enabled = False
+                    scope.invalidate()
+                    return await self._load_tuple(config) if checkpoint_id else latest
+                data = self.serde.dumps_typed(list(latest))
+                if (
+                    scope.active
+                    and scope.generation == generation
+                    and not scope.mutations
+                ):
+                    scope.key, scope.data = key, data
+            else:
+                data = scope.data
+            values = self.serde.loads_typed(data)
+            # JSON serializers may decode pending-write tuples as lists.
+            values[4] = [tuple(write) for write in values[4]]
+            result = CheckpointTuple(*values)
+            if checkpoint_id and get_checkpoint_id(result.config) != checkpoint_id:
+                scope.enabled = False
+                scope.invalidate()
+                return await self._load_tuple(config)
+            return result
+        except BaseException:
+            scope.enabled = False
+            scope.invalidate()
+            raise
+
+    def _active_read_scope(self) -> _CheckpointReadScope | None:
+        scope = self._read_scope.get()
+        return scope if scope is not None and scope.active else None
+
+    @asynccontextmanager
+    async def _request_scope(self) -> AsyncIterator[None]:
+        if self._exclusive_access is None:
+            yield
+            return
+        if self._active_read_scope() is not None:
+            raise RuntimeError("Checkpoint ownership scopes cannot be nested")
+        async with self._exclusive_access() as owned:
+            scope = _CheckpointReadScope(enabled=owned is True)
+            token = self._read_scope.set(scope)
+            try:
+                yield
+            finally:
+                scope.active = False
+                scope.invalidate()
+                self._read_scope.reset(token)
+
+    @asynccontextmanager
+    async def _write_scope(self) -> AsyncIterator[None]:
+        scope = self._active_read_scope()
+        if scope is None:
+            if self._exclusive_access is None:
+                yield
+            else:
+                async with self._exclusive_access():
+                    yield
+            return
+        scope.invalidate()
+        scope.mutations += 1
+        try:
+            yield
+        except BaseException:
+            scope.enabled = False
+            raise
+        finally:
+            scope.mutations -= 1
+            scope.invalidate()
+
+    async def _load_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         thread_id, checkpoint_ns = self._thread_and_namespace(config)
         store = await self._get_or_create_store(thread_id)
         try:
@@ -301,40 +435,41 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Persist one append-only LangGraph checkpoint."""
-        del new_versions
-        thread_id, checkpoint_ns = self._thread_and_namespace(config)
-        checkpoint_id = checkpoint["id"]
-        parent_checkpoint_id = get_checkpoint_id(config)
-        checkpoint_metadata = get_checkpoint_metadata(config, metadata)
+        async with self._write_scope():
+            del new_versions
+            thread_id, checkpoint_ns = self._thread_and_namespace(config)
+            checkpoint_id = checkpoint["id"]
+            parent_checkpoint_id = get_checkpoint_id(config)
+            checkpoint_metadata = get_checkpoint_metadata(config, metadata)
 
-        value: _CheckpointItemValue = {
-            "checkpoint_id": checkpoint_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint": self._serialize(checkpoint),
-            "metadata": self._serialize(checkpoint_metadata),
-            "parent_checkpoint_id": parent_checkpoint_id or "",
-        }
-        tags: _CheckpointItemTags = {
-            "kind": "checkpoint",
-            "ns": checkpoint_ns,
-        }
-        source = checkpoint_metadata.get("source")
-        step = checkpoint_metadata.get("step")
-        if source is not None:
-            tags["source"] = str(source)
-        if step is not None:
-            tags["step"] = str(step)
+            value: _CheckpointItemValue = {
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint": self._serialize(checkpoint),
+                "metadata": self._serialize(checkpoint_metadata),
+                "parent_checkpoint_id": parent_checkpoint_id or "",
+            }
+            tags: _CheckpointItemTags = {
+                "kind": "checkpoint",
+                "ns": checkpoint_ns,
+            }
+            source = checkpoint_metadata.get("source")
+            step = checkpoint_metadata.get("step")
+            if source is not None:
+                tags["source"] = str(source)
+            if step is not None:
+                tags["step"] = str(step)
 
-        store = await self._get_or_create_store(thread_id)
-        try:
-            await store.set_item(
-                self._checkpoint_key(checkpoint_ns, checkpoint_id),
-                cast(JSONObject, value),
-                tags=cast(Mapping[str, str], tags),
-            )
-        finally:
-            await store.aclose()
-        return self._config(thread_id, checkpoint_ns, checkpoint_id)
+            store = await self._get_or_create_store(thread_id)
+            try:
+                await store.set_item(
+                    self._checkpoint_key(checkpoint_ns, checkpoint_id),
+                    cast(JSONObject, value),
+                    tags=cast(Mapping[str, str], tags),
+                )
+            finally:
+                await store.aclose()
+            return self._config(thread_id, checkpoint_ns, checkpoint_id)
 
     async def aput_writes(
         self,
@@ -349,82 +484,84 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
         tasks after a failure and can lose special error, interrupt, resume,
         or scheduling state.
         """
-        thread_id, checkpoint_ns = self._thread_and_namespace(config)
-        checkpoint_id = get_checkpoint_id(config)
-        if not checkpoint_id:
-            raise ValueError("checkpoint_id is required to store pending writes")
-        if not task_id:
-            raise ValueError("task_id must be a non-empty string")
+        async with self._write_scope():
+            thread_id, checkpoint_ns = self._thread_and_namespace(config)
+            checkpoint_id = get_checkpoint_id(config)
+            if not checkpoint_id:
+                raise ValueError("checkpoint_id is required to store pending writes")
+            if not task_id:
+                raise ValueError("task_id must be a non-empty string")
 
-        store = await self._get_or_create_store(thread_id)
-        try:
-            for ordinal, (channel, value) in enumerate(writes):
-                index = WRITES_IDX_MAP.get(channel, ordinal)
-                item_value: _PendingWriteItemValue = {
-                    "checkpoint_id": checkpoint_id,
-                    "checkpoint_ns": checkpoint_ns,
-                    "task_id": task_id,
-                    "task_path": task_path,
-                    "index": index,
-                    "channel": channel,
-                    "value": self._serialize(value),
-                }
-                key = self._write_key(
-                    checkpoint_ns,
-                    checkpoint_id,
-                    task_id,
-                    index,
-                )
-                tags: _PendingWriteItemTags = {
-                    "kind": "write",
-                    "ns": checkpoint_ns,
-                    "ckpt": checkpoint_id,
-                }
-                if channel in WRITES_IDX_MAP:
-                    await store.set_item(
-                        key,
-                        cast(JSONObject, item_value),
-                        tags=cast(Mapping[str, str], tags),
+            store = await self._get_or_create_store(thread_id)
+            try:
+                for ordinal, (channel, value) in enumerate(writes):
+                    index = WRITES_IDX_MAP.get(channel, ordinal)
+                    item_value: _PendingWriteItemValue = {
+                        "checkpoint_id": checkpoint_id,
+                        "checkpoint_ns": checkpoint_ns,
+                        "task_id": task_id,
+                        "task_path": task_path,
+                        "index": index,
+                        "channel": channel,
+                        "value": self._serialize(value),
+                    }
+                    key = self._write_key(
+                        checkpoint_ns,
+                        checkpoint_id,
+                        task_id,
+                        index,
                     )
-                else:
-                    try:
-                        await store.create_item(
+                    tags: _PendingWriteItemTags = {
+                        "kind": "write",
+                        "ns": checkpoint_ns,
+                        "ckpt": checkpoint_id,
+                    }
+                    if channel in WRITES_IDX_MAP:
+                        await store.set_item(
                             key,
                             cast(JSONObject, item_value),
                             tags=cast(Mapping[str, str], tags),
                         )
-                    except FoundryStorageConflictError:
-                        pass
-        finally:
-            await store.aclose()
+                    else:
+                        try:
+                            await store.create_item(
+                                key,
+                                cast(JSONObject, item_value),
+                                tags=cast(Mapping[str, str], tags),
+                            )
+                        except FoundryStorageConflictError:
+                            pass
+            finally:
+                await store.aclose()
 
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete a thread's store and every checkpoint item in it."""
-        if not thread_id:
-            raise ValueError("thread_id must be a non-empty string")
-        store = self._bound_store(thread_id)
-        try:
-            if self._user_isolation:
-                keys: list[str] = []
-                after: str | None = None
-                while True:
-                    page = await store.list_keys(
-                        limit=_PAGE_SIZE,
-                        order="asc",
-                        after=after,
-                    )
-                    keys.extend(key.key for key in page.keys)
-                    if not page.has_more or page.last_id is None:
-                        break
-                    after = page.last_id
-                for key in keys:
-                    await store.delete_item(key)
-            else:
-                await store.delete()
-        except FoundryStorageNotFoundError:
-            pass
-        finally:
-            await store.aclose()
+        async with self._write_scope():
+            if not thread_id:
+                raise ValueError("thread_id must be a non-empty string")
+            store = self._bound_store(thread_id)
+            try:
+                if self._user_isolation:
+                    keys: list[str] = []
+                    after: str | None = None
+                    while True:
+                        page = await store.list_keys(
+                            limit=_PAGE_SIZE,
+                            order="asc",
+                            after=after,
+                        )
+                        keys.extend(key.key for key in page.keys)
+                        if not page.has_more or page.last_id is None:
+                            break
+                        after = page.last_id
+                    for key in keys:
+                        await store.delete_item(key)
+                else:
+                    await store.delete()
+            except FoundryStorageNotFoundError:
+                pass
+            finally:
+                await store.aclose()
 
     async def _get_or_create_store(self, thread_id: str) -> FoundryStateStore:
         store = await FoundryStateStore.get_or_create(
