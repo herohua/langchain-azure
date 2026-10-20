@@ -31,7 +31,7 @@ Before writing, serialize and check the actual service item-size limit. Define a
 
 ## Option B: batch writes
 
-If a supported service batch-write API is available, submit the existing per-output operations from each `aput_writes()` call in one batch. Keep current item keys, values, tags and readback unchanged. This avoids Option A's packed-format migration and preserves direct State Store inspection. Availability and the required semantics have not been confirmed; client-side parallel requests alone do not count as batching.
+This is a proposed new service capability, not an available SDK-only optimization. The public State Store documentation does not describe a batch-write API, and the pinned core SDK exposes only per-item writes. Plan on a State Store API/backend addition, then SDK support, before hosting can submit each saver call as a batch. Keep existing per-output keys, values, tags and readback unchanged. This preserves direct inspection without a packed-format migration. Client-side parallel requests alone do not count as batching.
 
 | Approach for the two fixture tasks | Write HTTP requests | Output items stored |
 | --- | ---: | ---: |
@@ -63,7 +63,7 @@ Option A also applies in principle to [CosmosDBSaver's per-output writes][cosmos
 
 For either fresh-path plan, six → two pending-write HTTP calls is a 67% segment reduction; continuation 38 → 34 is an 11% total call reduction. Packing stores two output items; batch writes retain six. No latency percentage is established, and retry/merge/split work can offset savings.
 
-Option A estimate: 140–260 production lines in langchain-azure plus 300–550 test/fixture lines. No external API change is expected with existing ETag operations, but dual-format deployment and compatible writers are mandatory. Option B estimate: 40–90 hosting lines, 100–220 core lines, plus 300–550 client/test-fixture lines. It requires a supported State Store batch capability and SDK exposure/release; service implementation, generated clients and service tests are unestimated. Availability is not confirmed.
+Option A estimate: 140–260 production lines in langchain-azure plus 300–550 test/fixture lines. No external API change is expected with existing ETag operations, but dual-format deployment and compatible writers are mandatory. Option B implementation size is TBD until the service batch contract is designed, including limits, atomicity and per-operation errors. Withdraw the earlier client-only line ranges: they do not estimate this service/API/SDK feature. Required dependencies are State Store API/backend implementation and release, then core SDK support/release, then langchain-azure integration. Its two-request target describes a future contract, not current capability.
 
 Any multi-output-task saver can benefit in principle, including ordinary LangGraph and DeepAgents; no checkpointer means no pending-write opportunity. Cosmos has a similar per-output write path but needs its own implementation and compatibility validation. See [the estimates and applicability matrix](../ESTIMATES.md).
 
@@ -72,7 +72,7 @@ Any multi-output-task saver can benefit in principle, including ordinary LangGra
 | Owner | Required work |
 | --- | --- |
 | `langchain-azure-ai` saver | Update `aput_writes`, item schema/key handling, `_pending_writes` and history/deletion compatibility. Keep public saver signatures and checkpoint/reference formats unchanged. |
-| AgentServer core / service | For Option A, verify [create-only and conditional replace semantics][core-write], returned ETags and item-size limits. For Option B, confirm a supported batch API, operation/error semantics and limits; identify and release missing prerequisites separately. |
+| AgentServer core / service | For Option A, verify [create-only and conditional replace semantics][core-write], returned ETags and item-size limits. For Option B, design and release the new service batch API/backend and core SDK support, with explicit operation/error semantics and limits, before hosting integration. |
 | Tests | Extend `test_foundry_checkpoint_saver.py` for multiple outputs, repeated/changed/extended batches, concurrent additions, special/mixed channels, ordering, serialization, empty/oversized batches and legacy/packed coexistence. Cover committed-then-timeout, conditional conflicts and cancellation without lost durable outputs. Existing graph, interrupt/resume and recovery tests must pass. |
 | Sample | Add a multi-output-per-task probe and write/readback assertions. Record logical outputs versus physical items, requests, payload bytes and conflicts. Keep the one-output-per-task and pagination controls. The current mock rejects conditional writes; extend and test it if the candidate uses ETag merging. |
 | Documentation / inspection | Provide legacy/packed examples mapping stored items to the same logical writes. Identify affected direct-store inspection scripts and update or document their required changes; make format/version, nested outputs and special records clear. |
