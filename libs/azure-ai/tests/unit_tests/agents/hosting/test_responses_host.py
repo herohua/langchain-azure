@@ -65,6 +65,53 @@ def _client(server: ResponsesHostServer) -> TestClient:
     return TestClient(server.app)
 
 
+@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "close"])
+async def test_handler_owns_clients_through_generator_exit(
+    monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    from azure.ai.agentserver.core.storage import FoundryStateStore
+
+    from langchain_azure_ai.agents.hosting._state_store_scope import _state_store
+
+    store = SimpleNamespace(get=AsyncMock(), aclose=AsyncMock())
+    acquire = AsyncMock(return_value=store)
+    monkeypatch.setattr(FoundryStateStore, "get_or_create", acquire)
+    server = ResponsesHostServer(make_echo_graph())
+    settled = []
+
+    async def handle(*args: Any) -> AsyncGenerator[Any, None]:
+        try:
+            async with _state_store(server, FoundryStateStore, "chain"):
+                pass
+            yield "admitted"
+            async with _state_store(server, FoundryStateStore, "chain"):
+                store.aclose.assert_not_awaited()
+                if ending == "failure":
+                    raise RuntimeError("failed")
+                if ending == "cancel":
+                    raise asyncio.CancelledError()
+        finally:
+            settled.append(True)
+
+    monkeypatch.setattr(server, "handle_create", handle)
+    events = server._handle_create_async_gen(_request(), _context(), asyncio.Event())
+    assert await anext(events) == "admitted"
+    store.aclose.assert_not_awaited()
+    if ending == "close":
+        await events.aclose()
+    else:
+        expected = {
+            "success": StopAsyncIteration,
+            "failure": RuntimeError,
+            "cancel": asyncio.CancelledError,
+        }[ending]
+        with pytest.raises(expected):
+            await anext(events)
+    assert settled == [True]
+    assert acquire.await_count == 1
+    store.aclose.assert_awaited_once()
+
+
 def test_constructor_registers_responses_features() -> None:
     with patch(
         "langchain_azure_ai.agents.hosting._responses_host."
