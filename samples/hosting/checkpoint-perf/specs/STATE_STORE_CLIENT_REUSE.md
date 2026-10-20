@@ -24,6 +24,12 @@ Preserve per-operation metadata refresh and isolation/TTL validation. Client reu
 
 Build platform headers and call IDs per outbound request, as [`_request`][headers] does today; keep User-Agent evaluation lazy. Explicit `user_id` is a client binding and must remain isolated. Borrowed credentials/transports stay caller-owned. Cross-request caches are outside scope.
 
+## Benefit, implementation size and applicability
+
+Full reuse targets two store-bound clients instead of ten per continuation (-80%), with a compatible shared connection pool; HTTP calls stay unchanged. Pool-only reuse can keep all clients but share their session. Real-network latency savings are unmeasured. Estimate: pool-only 40–90 production lines in langchain-azure plus 120–220 test/fixture lines; full handle reuse 100–180 hosting lines, possibly 30–70 core lines, plus 250–450 test/fixture lines. Existing injection may suffice for pooling. Full reuse may need a released core refresh/ownership API to preserve per-operation metadata checks without constructing new clients. No service API change is presumed.
+
+Any Foundry saver/chain-store user can benefit; DeepAgents is not required. Cosmos saver already retains its client/container, while the Foundry chain store remains separate. With no checkpointer, this proposal does not optimize the host's distinct Responses/history clients. See [the estimates and applicability matrix](../ESTIMATES.md).
+
 ## Components and validation
 
 | Owner | Required work |

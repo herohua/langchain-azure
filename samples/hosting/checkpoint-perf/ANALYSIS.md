@@ -132,7 +132,7 @@ State Store [tags filter keys with AND conditions][tags]; listing returns keys o
 
 ## History-depth amplification with DeltaChannel
 
-The local simple graph has 38 requests in each continuation; its count does not grow from turn two to four. The hosted DeepAgent has another path: [messages][delta-messages] and [files][delta-files] use DeltaChannel with a snapshot frequency of 50 updates in DeepAgents 0.7.25. Between snapshots, restoring the channel can require older checkpoint outputs.
+The local simple graph has 38 requests in each continuation; its count does not grow from turn two to four. The hosted DeepAgent has another path: [messages][delta-messages] and [files][delta-files] use DeltaChannel with a snapshot frequency of 50 updates in DeepAgents 0.7.25. Between snapshots, restoring the channel can require older checkpoint outputs. This is a delta-backed-state issue, not a general consequence of using LangChain/LangGraph or a checkpointer. Ordinary non-delta graphs do not need proposal 5; custom DeltaChannel graphs can benefit without using DeepAgents.
 
 LangGraph [detects missing delta state][delta-restore] and calls `aget_delta_channel_history()`. FoundryCheckpointSaver inherits the [base implementation][delta-history], which reads the target and follows `parent_config` one checkpoint at a time until it finds channel seeds. Each tuple load can add metadata, item and pending-write list/value calls. This is repeated reconstruction across history, distinct from loading 24 pending outputs under one checkpoint.
 
@@ -143,6 +143,8 @@ Retained off-mode hosted measurements recorded 98 checkpoint loads over 49 warm 
 ## What each proposal can change
 
 These are independent, unimplemented targets; do not sum them without measuring a combined candidate.
+
+See [ESTIMATES.md](ESTIMATES.md) for standalone benefit models, code-size ranges by repository, external prerequisites and the no-checkpointer/Foundry/Cosmos applicability matrix. The fifth proposal targets DeepAgents/default delta state, not this ordinary local graph.
 
 | Proposal | Target for this fixture | Boundary |
 | --- | --- | --- |

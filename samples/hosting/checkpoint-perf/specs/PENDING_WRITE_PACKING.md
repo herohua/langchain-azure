@@ -57,6 +57,14 @@ Deploy a dual-format reader before enabling packed writes. Old readers cannot co
 
 Plan A also applies in principle to [CosmosDBSaver's per-output writes][cosmos], unlike the Foundry-specific descriptor issue. It would require a separate format/compatibility change there. Cosmos already queries full pending-write documents, so fewer documents do not imply proportionally fewer read HTTP requests or RU savings. Measure write requests, bytes and RU separately; no Cosmos change is included here.
 
+## Benefit, implementation size and applicability
+
+For either fresh-path plan, six → two pending-write HTTP calls is a 67% segment reduction; continuation 38 → 34 is an 11% total call reduction. Packing stores two output items; batch writes retain six. No latency percentage is established, and retry/merge/split work can offset savings.
+
+Plan A estimate: 140–260 production lines in langchain-azure plus 300–550 test/fixture lines. No external API change is expected with existing ETag operations, but dual-format deployment and compatible writers are mandatory. Plan B estimate: 40–90 hosting lines, 100–220 core lines, plus 300–550 client/test-fixture lines. It requires a supported State Store batch capability and SDK exposure/release; service implementation, generated clients and service tests are unestimated. Availability is not confirmed.
+
+Any multi-output-task saver can benefit in principle, including ordinary LangGraph and DeepAgents; no checkpointer means no pending-write opportunity. Cosmos has a similar per-output write path but needs its own implementation and compatibility validation. See [the estimates and applicability matrix](../ESTIMATES.md).
+
 ## Components and validation
 
 | Owner | Required work |

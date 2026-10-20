@@ -24,6 +24,12 @@ Remove only the immediate second GET. Each later saver/chain-store operation mus
 
 For nine or ten successful existing-store acquisitions without retries, the expected signal is 18 -> 9 or 20 -> 10 descriptor GETs, with transport counts unchanged. Item reads and writes should not change. Handler-wide metadata caching and [client reuse](STATE_STORE_CLIENT_REUSE.md) are separate changes.
 
+## Benefit, implementation size and applicability
+
+Standalone continuation target: 38 → 28 HTTP calls (-26%), with descriptor GETs halved; first/fresh requests 33 → 24 (-27%). Elapsed savings depend on metadata latency and overlap. Estimate: 15–35 production lines in langchain-azure, 30–60 in azure-sdk-for-python core, plus 120–220 test/fixture lines across both. The supported core descriptor accessor and its package release are required external dependencies; no State Store API change is needed.
+
+This is a Foundry State Store acquisition optimization, not a DeepAgents feature. Cosmos saver has no equivalent duplicate descriptor path; a separate Foundry chain store can still benefit. With no checkpointer, the standard host skips that checkpoint-reference path. See [the estimates and applicability matrix](../ESTIMATES.md).
+
 ## Components and validation
 
 | Owner | Required work |

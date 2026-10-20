@@ -8,6 +8,8 @@ We keep the real saver methods, client construction and HTTP pipeline because th
 
 See [the data-flow and request breakdown](ANALYSIS.md) for a Mermaid overview, the 38-request continuation accounting, the separate pending-write probe and how the five proposals relate.
 
+[ESTIMATES.md](ESTIMATES.md) compares each proposal's independent benefit, production/test code size, required repository/service dependencies and applicability without a checkpointer or with Foundry/Cosmos savers.
+
 ## Run
 
 From this sample directory:
@@ -54,7 +56,7 @@ Expected signals: fewer descriptor GETs with unchanged client construction for [
 
 A fourth proposal, [pending-write packing](specs/PENDING_WRITE_PACKING.md), targets six-to-two item writes for the two multi-output tasks in this fixture. It changes stored format and requires separate compatibility and idempotency validation; the current benchmark has not implemented or measured it.
 
-[Proposal 5: complete checkpoint materialization](specs/CHECKPOINT_MATERIALIZATION.md) addresses a separate finding: DeltaChannel history reconstruction can amplify remote reads as conversations deepen. It evaluates full state in each saved checkpoint while retaining sync durability and pending writes. Source and hosted observations support the finding; a separate DeltaChannel benchmark is still needed to measure the read/byte tradeoff.
+[Proposal 5: complete checkpoint materialization](specs/CHECKPOINT_MATERIALIZATION.md) addresses DeepAgents' default DeltaChannel history reconstruction, also possible in custom delta-backed graphs. Ordinary non-delta LangChain/LangGraph graphs and no-checkpointer requests do not have this path. It evaluates full state in each saved checkpoint while retaining sync durability and pending writes; a separate DeltaChannel benchmark is needed to measure the read/byte tradeoff.
 
 ## Hosted performance observations
 

@@ -36,6 +36,14 @@ Lowering `snapshot_frequency` is a useful comparison, not an equivalent guarante
 
 This proposal changes representation and snapshot policy, not the choice to persist only at graph exit. No request-count reduction is promised for graph writes or for the non-delta local fixture. Existing independent metadata/client optimizations remain applicable.
 
+## Benefit, implementation size and applicability
+
+The target is zero ancestor-history reads for newly materialized channels; top-level checkpoint and pending-write reads remain. The observed 102 versus two tuple loads/request identifies a large optimization opportunity, but not all excess loads have been classified. If all 100 excess loads were removable history reconstruction, that would be an illustrative 98% ceiling for tuple-load invocations, not a target or total latency estimate. The ordinary non-delta local fixture should see no benefit. Larger snapshots may offset the read saving.
+
+Estimate: 60–140 production lines in LangGraph for a supported snapshot-policy hook, 30–70 in langchain-azure for integration/validation, plus 300–600 test/fixture lines. A LangGraph release is an expected external dependency for the exact every-checkpoint policy. DeepAgents is a compatibility target; production changes there are conditional on how the policy is exposed. No core/service change is expected within item limits; large-value offload is additional scope. See [the estimate definitions](../ESTIMATES.md).
+
+The main observed case is DeepAgents 0.7.25 with default delta-backed messages/files. This is not relevant to ordinary LangChain/LangGraph graphs without delta-backed state, or to requests without a checkpointer. It also applies to custom graphs using DeltaChannel, so it is not exclusive to DeepAgents. Cosmos [already bulk-loads delta history][cosmos-history]; the read/byte tradeoff still exists, but Foundry's per-ancestor request saving does not transfer directly. Legacy delta-written history may still need reconstruction after a channel-schema change.
+
 ## Components and validation
 
 The snapshot-versus-replay tradeoff also applies to other DeltaChannel savers, including Cosmos DB. Their history-query implementation can differ from Foundry's default walk; do not transfer these call counts or assume the same benefit without a separate comparison.
@@ -60,3 +68,4 @@ Measure in ABBA order with identical graphs, versions, workloads and `sync` dura
 [save]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L296-L337
 [delta]: https://reference.langchain.com/python/langgraph/channels/delta/DeltaChannel
 [limits]: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store?tabs=python#limits
+[cosmos-history]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L272-L335

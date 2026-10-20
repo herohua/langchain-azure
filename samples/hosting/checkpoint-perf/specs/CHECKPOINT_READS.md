@@ -48,6 +48,14 @@ LangGraph supports [exit-time persistence][exit-save] with `durability="exit"`; 
 
 Exit includes normal completion, an interrupt or an error. It does not protect intermediate progress against a process crash, and replay can repeat external side effects. Exit-time persistence also need not be one HTTP write: checkpoint, pending-write and chain-store records remain distinct. Any later adoption must preserve interrupt/resume and response recovery, await required graph persistence before publishing its chain-store reference, and document the reduced recovery guarantee.
 
+## Benefit, implementation size and applicability
+
+Bounded reads (3A) keep HTTP counts unchanged. With 24 equal-duration reads and a bound of eight, the item-read waiting segment ideally falls from 24 serial waits to three waves (-87.5%); including four unchanged serial calls gives a modeled 75% reduction for that probe, not measured end-to-end savings. Empty pending-write lists gain nothing. Estimate: 40–80 production lines in langchain-azure plus 180–320 test/fixture lines; no external API change.
+
+Request reuse (3B) has a conservative fixture target of 38 → 30 calls (-21%) if one latest-key lookup establishes freshness and one reconstruction serves all consumers, excluding ownership/lease traffic. Estimate: 120–220 hosting lines, possibly 50–120 LangGraph lines for a supported hook, plus 300–600 test/fixture lines. A deployment-wide ownership contract is required; new coordination infrastructure is not included. A LangGraph release is a conditional external dependency, not a prerequisite for 3A.
+
+Both need a checkpointer but not DeepAgents. Cosmos already queries complete pending-write documents, so 3A does not transfer; 3B may still avoid repeated queries. No-checkpointer requests have no saver reads to optimize. See [the estimates and applicability matrix](../ESTIMATES.md).
+
 ## Components and validation
 
 | Owner | Required work |
