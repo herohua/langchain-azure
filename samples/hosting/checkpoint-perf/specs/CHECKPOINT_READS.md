@@ -20,7 +20,9 @@ In the refreshed local baseline, each continuation has four item GETs: one chain
 
 [CosmosDBSaver queries complete pending-write documents](https://github.com/langchain-ai/langchain-azure/blob/4b5bb9bcc2b5dc8bc4890675ddae05c88a1dcf71/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L659-L688), potentially across pages; it has no key-list plus per-item GET loop to parallelize. Reuse between host inspection and graph execution may still help with Cosmos DB, subject to the freshness and mutation-isolation constraints below.
 
-## First delivery: bounded concurrent reads
+Sections 3.1 and 3.2 are complementary and can coexist. Each can be delivered and measured separately; 3.1 does not depend on 3.2.
+
+## 3.1 Bounded concurrent reads
 
 In `_pending_writes()`, read item values concurrently within each listed page. Start with an internal limit of eight outstanding reads per invocation; eight is an initial bound to validate, not a measured optimum. Process one page at a time and avoid one task per key across all pages. Concurrent invocations can multiply traffic; this is not a saver-wide or service-wide limit.
 
@@ -32,7 +34,7 @@ This hosting-only change needs no new public option, backend batch API, LangGrap
 
 [Complete checkpoint materialization](CHECKPOINT_MATERIALIZATION.md) separately targets DeltaChannel ancestor-history reconstruction. Reusing one requested tuple does not remove reads of distinct historical checkpoints required by the current delta representation.
 
-## Optional follow-up: load once within a request
+## 3.2 Request-scoped checkpoint reuse
 
 For sequential conversation handling, use this flow: acquire exclusive thread ownership, establish the current checkpoint, load it and its pending writes once, inspect interrupts, then execute the graph from that loaded data. Keep existing durable writes and the final chain-store reference update. One load means one checkpoint reconstruction, not one HTTP request: pending-write items may still require multiple reads.
 
@@ -50,11 +52,11 @@ Exit includes normal completion, an interrupt or an error. It does not protect i
 
 ## Benefit, implementation size and applicability
 
-Bounded reads (3A) keep HTTP counts unchanged. With 24 equal-duration reads and a bound of eight, the item-read waiting segment ideally falls from 24 serial waits to three waves (-87.5%); including four unchanged serial calls gives a modeled 75% reduction for that probe, not measured end-to-end savings. Empty pending-write lists gain nothing. Estimate: 40–80 production lines in langchain-azure plus 180–320 test/fixture lines; no external API change.
+Bounded reads (3.1) keep HTTP counts unchanged. With 24 equal-duration reads and a bound of eight, the item-read waiting segment ideally falls from 24 serial waits to three waves (-87.5%); including four unchanged serial calls gives a modeled 75% reduction for that probe, not measured end-to-end savings. Empty pending-write lists gain nothing. Estimate: 40–80 production lines in langchain-azure plus 180–320 test/fixture lines; no external API change.
 
-Request reuse (3B) has a conservative fixture target of 38 → 30 calls (-21%) if one latest-key lookup establishes freshness and one reconstruction serves all consumers, excluding ownership/lease traffic. Estimate: 120–220 hosting lines, possibly 50–120 LangGraph lines for a supported hook, plus 300–600 test/fixture lines. A deployment-wide ownership contract is required; new coordination infrastructure is not included. A LangGraph release is a conditional external dependency, not a prerequisite for 3A.
+Request reuse (3.2) has a conservative fixture target of 38 → 30 calls (-21%) if one latest-key lookup establishes freshness and one reconstruction serves all consumers, excluding ownership/lease traffic. Estimate: 120–220 hosting lines, possibly 50–120 LangGraph lines for a supported hook, plus 300–600 test/fixture lines. A deployment-wide ownership contract is required; new coordination infrastructure is not included. A LangGraph release is a conditional external dependency, not a prerequisite for 3.1.
 
-Both need a checkpointer but not DeepAgents. Cosmos already queries complete pending-write documents, so 3A does not transfer; 3B may still avoid repeated queries. No-checkpointer requests have no saver reads to optimize. See [the estimates and applicability matrix](../ESTIMATES.md).
+Both need a checkpointer but not DeepAgents. Cosmos already queries complete pending-write documents, so 3.1 does not transfer; 3.2 may still avoid repeated queries. No-checkpointer requests have no saver reads to optimize. See [the estimates and applicability matrix](../ESTIMATES.md).
 
 ## Components and validation
 
