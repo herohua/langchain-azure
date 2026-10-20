@@ -28,20 +28,28 @@ Preserve page cursors, missing-item handling, content and final `(task_id, index
 
 This hosting-only change needs no new public option, backend batch API, LangGraph change or core dependency. It can ship independently of [descriptor reuse](STATE_STORE_DESCRIPTOR_REUSE.md) and [client reuse](STATE_STORE_CLIENT_REUSE.md).
 
-## Optional follow-up: reuse confirmed duplicate reads
+## Optional follow-up: load once within a request
 
-Trace first. Reuse only within one invocation and the same identity, thread, namespace and resolved checkpoint. A request for latest state cannot reuse an older selection without proving freshness. Preserve the superseded-checkpoint check; equality in this fixture does not justify replacing a latest lookup with an addressed checkpoint. Do not remove interrupt inspection to save reads.
+For sequential conversation handling, use this flow: acquire exclusive thread ownership, establish the current checkpoint, load it and its pending writes once, inspect interrupts, then execute the graph from that loaded data. Keep existing durable writes and the final chain-store reference update. One load means one checkpoint reconstruction, not one HTTP request: pending-write items may still require multiple reads.
 
-Pending writes can change under the same checkpoint ID. Invalidate on `aput_writes`, `aput`, thread deletion and invocation failure/cancellation/exit; prevent an in-flight read from refilling invalidated data. Local invalidation cannot detect another writer: do not reuse mutable data unless other writers are excluded or a supported consistency check covers them.
+This needs an enforced ownership contract covering all writers, including other requests, recovery workers and `update_state()`, across processes. Ownership must span initial selection through durable writes and the final reference update. A single request happening to run alone is insufficient. If the supplied checkpoint is not current, or ownership cannot be guaranteed, retain the normal reads and latest-checkpoint check. Historical replay remains a separate path.
 
-Return independent mutable state to each caller. LangGraph's [snapshot preparation][snapshot] applies pending writes to the loaded checkpoint, so inspection and execution must not receive the same mutable `CheckpointTuple`. Serialized-data reuse with independent deserialization is one option. If freshness and mutation isolation cannot be guaranteed, ship concurrent reads alone.
+Scope reuse to the invocation, identity, thread, namespace and checkpoint. Under that contract, interrupt inspection, execution startup and the [superseded-checkpoint check][superseded] can use the same established current selection through a supported integration. Preserve the check's meaning; do not globally disable it or treat every addressed checkpoint as latest. The fixture's target is one checkpoint item read instead of three, plus the separate chain-store reference read; this is not yet measured.
+
+Return independent mutable state to each caller: [snapshot preparation][snapshot] can modify the loaded checkpoint. Reuse serialized data and deserialize independently, or prove equivalent isolation. Pending writes can change under the same checkpoint ID. On `aput_writes`, `aput` or deletion, invalidate affected cached data before mutation and prevent stale in-flight reads from refilling it. Publish updated cache data only after successful persistence; otherwise reload. Clear the scope on failure, cancellation or exit, and use the [handle ownership/cleanup rules](STATE_STORE_CLIENT_REUSE.md). This changes read reuse, not write durability.
+
+## Separate future option: persist at graph exit
+
+LangGraph supports [exit-time persistence][exit-save] with `durability="exit"`; the [current host selects `sync`][host-durability]. Changing this policy is outside the read-reuse delivery. Evaluate the existing mode separately instead of buffering or discarding saver writes in a custom wrapper.
+
+Exit includes normal completion, an interrupt or an error. It does not protect intermediate progress against a process crash, and replay can repeat external side effects. Exit-time persistence also need not be one HTTP write: checkpoint, pending-write and chain-store records remain distinct. Any later adoption must preserve interrupt/resume and response recovery, await required graph persistence before publishing its chain-store reference, and document the reduced recovery guarantee.
 
 ## Components and validation
 
 | Owner | Required work |
 | --- | --- |
 | `langchain-azure-ai` saver | Change [`_pending_writes()`][writes]; verify `aget_tuple`/`alist` close the store after children settle. Extend `test_foundry_checkpoint_saver.py` for pagination, missing items, ordering, the eight-read bound, simultaneous invocations and original-error/cancellation cleanup. |
-| Hosting / LangGraph | Verify interrupt/resume and recovery paths in `test_responses_host.py` and `test_resilient.py`. For optional reuse only, trace inspection/execution and add mutation isolation, invalidation/read-race, deletion, freshness and request-isolation tests. No upstream LangGraph hook is presumed. |
+| Hosting / LangGraph | Verify interrupt/resume and recovery paths in `test_responses_host.py` and `test_resilient.py`. For read reuse, test exclusive ownership, stale references/replay fallback, independent mutable returns, writes/deletion, failed persistence, invalidation/read races and scope cleanup. Assert one physical checkpoint load across inspection/execution only when the contract holds. Identify any required supported LangGraph hook separately; it must not block bounded reads. |
 | AgentServer core | Verify concurrent [`get_item`][item] use on one client with [key pagination][keys] and actual retry attempts. No production change is expected for bounded reads. |
 | Sample | Preserve persisted file/TODO/message and pending-write checks. Add store acquisition, pagination, item-read/deserialization timings, returned bytes, logical reads versus HTTP attempts and maximum concurrency. |
 
@@ -58,3 +66,5 @@ Compare base/candidate in ABBA order (base, candidate, candidate, base), with id
 [graph-loop]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_loop.py#L2061-L2090
 [snapshot]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/main.py#L1425-L1443
 [superseded]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_checkpoint.py#L175-L200
+[host-durability]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L348-L352
+[exit-save]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_loop.py#L1497-L1511
