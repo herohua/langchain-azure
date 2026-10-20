@@ -18,7 +18,9 @@ Use one handler-owned scope to reuse compatible clients or their HTTP connection
 
 Reuse store clients only for compatible store name, endpoint/API version, isolation/TTL settings, credential, delegated user and pipeline options. Never share a store-bound client across stores or identities. Checkpoint and chain stores have different names; they may share a compatible transport/session without sharing store bindings.
 
-Core already forwards transport options through `**kwargs`. First check that path and Azure Core's [borrowed-session ownership][transport] before requiring a new core API. A shared transport is unsafe if one borrower's close disables another; prove ownership/closure behavior in tests. Add a supported injection/ownership contract only if existing APIs cannot express it. Do not access private clients.
+Keep ownership in langchain-azure: the handler scope creates/registers handles, lends them to saver/chain-store operations and closes them once after outstanding work settles. Remove operation-level closure for borrowed handles; keep it for standalone, operation-owned handles. The descriptor is ordinary data, not a resource that needs closing. No core ownership API is needed.
+
+Acquire a handle initially through the existing public `get_or_create()`, then refresh its descriptor with public [`get()`][refresh] on later operations. Preserve validation and handle missing/recreated stores through the existing public acquisition/error paths, retiring affected handles safely. Do not call `get_or_create()` on every successful reuse, since that constructs a new client. Core already forwards transport options through `**kwargs`; use Azure Core's [borrowed-session ownership][transport] for compatible pooling. Prove that closing one borrower cannot disable another, without accessing private clients.
 
 Preserve per-operation metadata refresh and isolation/TTL validation. Client reuse must not silently skip `get_or_create`'s metadata read; [descriptor reuse](STATE_STORE_DESCRIPTOR_REUSE.md) is separate. Keep conflict handling, retry/write semantics and backend errors unchanged.
 
@@ -26,7 +28,7 @@ Build platform headers and call IDs per outbound request, as [`_request`][header
 
 ## Benefit, implementation size and applicability
 
-Full reuse targets two store-bound clients instead of ten per continuation (-80%), with a compatible shared connection pool; HTTP calls stay unchanged. Pool-only reuse can keep all clients but share their session. Real-network latency savings are unmeasured. Estimate: pool-only 40–90 production lines in langchain-azure plus 120–220 test/fixture lines; full handle reuse 100–180 hosting lines, possibly 30–70 core lines, plus 250–450 test/fixture lines. Existing injection may suffice for pooling. Full reuse may need a released core refresh/ownership API to preserve per-operation metadata checks without constructing new clients. No service API change is presumed.
+Full reuse targets two store-bound clients instead of ten per continuation (-80%) when both stores remain available, with a compatible shared connection pool. Preserve the baseline metadata-call policy when measuring client reuse alone; refreshes use `get()` on the existing handle. Pool-only reuse can keep all clients but share their session. Real-network latency savings are unmeasured. Estimate: pool-only 40–90 production lines in langchain-azure plus 120–220 test/fixture lines; full handle reuse 100–180 production lines in langchain-azure plus 250–450 test/fixture lines. No azure-sdk-for-python code change/release or State Store API change is required for this design. Descriptor proposal 1 remains separate.
 
 Any Foundry saver/chain-store user can benefit; DeepAgents is not required. Cosmos saver already retains its client/container, while the Foundry chain store remains separate. With no checkpointer, this proposal does not optimize the host's distinct Responses/history clients. See [the estimates and applicability matrix](../ESTIMATES.md).
 
@@ -35,12 +37,12 @@ Any Foundry saver/chain-store user can benefit; DeepAgents is not required. Cosm
 | Owner | Required work |
 | --- | --- |
 | `langchain-azure-ai` | Establish scope in [Responses hosting][host]; adapt [saver][saver] and [chain-store][chain] acquisition/closure while retaining standalone behavior. |
-| AgentServer core / Azure Core | Verify [pipeline construction/closure][client], [store/credential ownership][state] and [session borrowing][transport]. Change core only if a supported contract is missing. Responses dispatch is a compatibility target, not a presumed production change. |
-| Tests / sample | Extend saver, `test_resilient.py`, `test_responses_host.py` and [core storage tests][core-tests]. Cover concurrent operations, distinct stores/users/options, current headers, failure/cancellation and owner-only closure after children settle. |
+| AgentServer core / Azure Core | Compatibility verification only: existing [pipeline construction/closure][client], [public descriptor refresh][refresh], [store/credential ownership][state] and [session borrowing][transport]. No production core or Responses change is planned. |
+| Tests / sample | Extend hosting saver, `test_resilient.py`, `test_responses_host.py` and fixture tests; use [core storage tests][core-tests] as API references. Cover concurrent operations, distinct stores/users/options, current headers, missing/recreated stores, failure/cancellation and owner-only closure after children settle. |
 
 Compare the client-only change in ABBA order (base, candidate, candidate, base), with matched dependencies and histories. Report pipeline/transport construction and closure separately, descriptor/item counts, storage interval union and elapsed time. Metadata counts must stay unchanged; session-only reuse may leave pipeline construction unchanged. Test actual pooling with a real transport and matched remote workloads; retain failures/throttling. Synthetic construction counts alone do not prove latency savings.
 
-No LangGraph or service API change is expected. If a new core/Responses contract is required, release it before updating hosting's dependency floor and sample requirements. Measure each proposal separately, or report its incremental effect explicitly.
+No external repository or service API change is required for handle lifetime management using these public APIs. Measure client reuse separately from descriptor-read reduction, or report the incremental effect explicitly.
 
 [saver]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L171-L204
 [chain]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses/conversation_chain_store.py#L179-L235
@@ -50,3 +52,4 @@ No LangGraph or service API change is expected. If a new core/Responses contract
 [headers]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L215-L240
 [transport]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/core/azure-core/azure/core/pipeline/transport/_aiohttp.py#L120-L210
 [core-tests]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/tests/test_foundry_state_store.py
+[refresh]: https://github.com/Azure/azure-sdk-for-python/blob/f00fb28c5a53593d3dc74d8bebe204e27a604c7f/sdk/agentserver/azure-ai-agentserver-core/azure/ai/agentserver/core/storage/_state.py#L463-L474
