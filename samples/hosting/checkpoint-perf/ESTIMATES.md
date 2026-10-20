@@ -55,7 +55,19 @@ Applicability follows the code path, not merely the framework name. `ResponsesHo
 
 ## Delivery order
 
-Prioritize a controlled comparison for 5 and discuss DeepAgents opt-out/snapshot interfaces first; determine whether LangGraph changes are needed before estimating production lines. Advance 1's core descriptor API in parallel: it has the clearest request-count reduction. Investigate 2 pool-only without a new core API. Scope 3.2's ownership contract; 3.1 remains a small independent change for multi-output restoration. Treat 4 (Option A)/4 (Option B) as alternatives. No proposal requires another proposal to ship first; combined gains need a separate matched run.
+Prioritize validation of the long-conversation bottleneck while advancing the smallest clear request-count reduction in parallel. Validation priority is not a promise to ship a policy before its recovery and size tradeoffs are tested.
+
+| Priority | Proposal | Benefit versus impact | Next step / dependency |
+| --- | --- | --- | --- |
+| **Validate first** | **5. Full checkpoint snapshots** | Highest potential for the observed deep-history path; net latency benefit is unmeasured, and larger snapshots can increase write cost or exceed item limits. | Discuss DeepAgents delta opt-out or explicit snapshot policy, then compare matched histories with sync durability and pending writes unchanged. LangGraph work depends on the chosen interface. |
+| **Advance in parallel; first small delivery** | **1. Descriptor reuse** | Clearest independent target: continuation 38 → 28 requests. Small code change, unchanged item format and recovery policy. | Agree and release the core descriptor accessor, then integrate hosting. |
+| **Next** | **2. Client reuse** | Broad setup/pooling opportunity within langchain-azure; real-network latency benefit still needs measurement. | Start with pool-only reuse, then evaluate shared handles and cleanup. No core/service change required for the described design. |
+| **After ownership is established** | **3.2 Checkpoint reuse** | Conservative target 38 → 30 requests, but freshness, mutable-state isolation and invalidation make it riskier than descriptor/client reuse. | Confirm deployment-wide thread ownership; implement request-local saver caching without LangGraph changes. |
+| **Workload-dependent** | **3.1 Parallel pending-write reads** | Small independent change; benefits multi-item restoration, not this fixture's empty normal-continuation pending list. | Measure realistic task/channel counts, including the 24-output upper-range probe; retain cancellation and throttling checks. |
+| **Defer** | **4 (Option A) Pending-write packing** | Target 38 → 34 requests, with a larger format, deduplication, inspection and rolling-upgrade cost. | Reassess after simpler read/client work; validate multi-output task prevalence and compatible format rollout. |
+| **Service-side long-term option** | **4 (Option B) Batch writes** | Retains individual items and inspection behavior, but cannot be delivered by hosting alone. | Requires a new State Store API/backend contract and core SDK support; implementation size is TBD. |
+
+No proposal requires another proposal to ship first. Sections 3.1/3.2 can coexist; 4 (Option A)/4 (Option B) are alternatives. Combined gains need a separate matched run.
 
 [host-config]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L635-L664
 [cosmos-history]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-cosmosdb/src/langchain_azure_cosmosdb/aio/_langgraph_checkpoint_store.py#L272-L335
