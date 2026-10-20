@@ -6,7 +6,7 @@ The mock transport replaces network/service calls with in-memory storage and con
 
 We keep the real saver methods, client construction and HTTP pipeline because those are what this diagnostic measures. Skipping storage calls or mocking the saver methods would hide repeated descriptor GETs, transport construction and serial item reads. Normal local file storage also bypasses the HTTP pipeline. This mock reproduces client-side call patterns, not service latency, network connection pooling or backend failures.
 
-See [the data-flow and request breakdown](Analysis.md) for a Mermaid overview, the 38-request continuation accounting, the separate pending-write probe and how the four proposals relate.
+See [the data-flow and request breakdown](ANALYSIS.md) for a Mermaid overview, the 38-request continuation accounting, the separate pending-write probe and how the five proposals relate.
 
 ## Run
 
@@ -53,6 +53,8 @@ Use a small base/candidate/candidate/base sequence with separate output files an
 Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); less client or connection-pool setup with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md), measured separately for pipelines, transports and sessions; higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
 A fourth proposal, [pending-write packing](specs/PENDING_WRITE_PACKING.md), targets six-to-two item writes for the two multi-output tasks in this fixture. It changes stored format and requires separate compatibility and idempotency validation; the current benchmark has not implemented or measured it.
+
+[Proposal 5: complete checkpoint materialization](specs/CHECKPOINT_MATERIALIZATION.md) addresses a separate finding: DeltaChannel history reconstruction can amplify remote reads as conversations deepen. It evaluates full state in each saved checkpoint while retaining sync durability and pending writes. Source and hosted observations support the finding; a separate DeltaChannel benchmark is still needed to measure the read/byte tradeoff.
 
 ## Hosted performance observations
 

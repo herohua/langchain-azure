@@ -1,6 +1,8 @@
 # Local Checkpoint Performance Baseline
 
-See [Analysis.md](../Analysis.md) for the data-flow diagram, per-stage request counts and source-code walkthrough.
+See [ANALYSIS.md](../ANALYSIS.md) for the data-flow diagram, per-stage request counts and source-code walkthrough.
+
+The separate [DeltaChannel materialization proposal](../specs/CHECKPOINT_MATERIALIZATION.md) records a source-supported hosted history-read finding. This non-delta local baseline does not test that path or measure the proposed benefit.
 
 Refreshed 2026-10-20 against upstream [langchain-azure HEAD `d6befba`](https://github.com/langchain-ai/langchain-azure/commit/d6befba95a86f55328b2e95eb61151a2f8889485), package `1.2.11`. Latest stable versions checked on PyPI: [LangGraph `1.2.16`](https://pypi.org/project/langgraph/1.2.16/), [AgentServer core `2.2.0`](https://pypi.org/project/azure-ai-agentserver-core/2.2.0/) and [Responses `2.3.0`](https://pypi.org/project/azure-ai-agentserver-responses/2.3.0/). Core/Responses were already current.
 

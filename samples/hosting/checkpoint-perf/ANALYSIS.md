@@ -130,6 +130,16 @@ The saver writes and queries pending-write tags `kind=write`, `ns=<namespace>` a
 
 State Store [tags filter keys with AND conditions][tags]; listing returns keys only. Once all 24 matching values are needed, there are still 24 `get_item()` calls. Tags are already used correctly. They neither return full values nor batch writes, and their availability does not reveal the service's physical indexing strategy.
 
+## History-depth amplification with DeltaChannel
+
+The local simple graph has 38 requests in each continuation; its count does not grow from turn two to four. The hosted DeepAgent has another path: [messages][delta-messages] and [files][delta-files] use DeltaChannel with a snapshot frequency of 50 updates in DeepAgents 0.7.25. Between snapshots, restoring the channel can require older checkpoint outputs.
+
+LangGraph [detects missing delta state][delta-restore] and calls `aget_delta_channel_history()`. FoundryCheckpointSaver inherits the [base implementation][delta-history], which reads the target and follows `parent_config` one checkpoint at a time until it finds channel seeds. Each tuple load can add metadata, item and pending-write list/value calls. This is repeated reconstruction across history, distinct from loading 24 pending outputs under one checkpoint.
+
+Retained off-mode hosted measurements recorded 98 checkpoint loads over 49 warm empty-history requests (2 per request), versus 5,100 over 50 requests after ten completed turns (102 per request). Logical storage/task call P50 rose from 42 to 579, and request latency P50 from 3.19 to 57.29 seconds. These summaries support the source-level amplification finding; they do not isolate all latency or establish full materialization's net benefit. Response-chain resolution and service variation remain separate contributors.
+
+[Proposal 5](specs/CHECKPOINT_MATERIALIZATION.md) evaluates complete channel state in every newly saved checkpoint while keeping `sync` durability and pending writes. This targets low-cost reconstruction from intermediate as well as final checkpoints. It trades ancestor-read reduction for more serialization, write bytes and storage, subject to the State Store item-size limit. The current local fixture has no DeltaChannel, so a separate delta-history reproduction and matched measurement are required for acceptance. Setting `snapshot_frequency=1` is a comparison, not a guarantee that unchanged channels are materialized at every checkpoint.
+
 ## What each proposal can change
 
 These are independent, unimplemented targets; do not sum them without measuring a combined candidate.
@@ -140,6 +150,7 @@ These are independent, unimplemented targets; do not sum them without measuring 
 | [2. Client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md) | Reuse two store-bound handles rather than create nine/ten per request; share a compatible pool where supported. | HTTP call count stays unchanged if metadata policy is unchanged. Owner closes resources after all work settles, including exceptions/cancellation. |
 | [3. Checkpoint reads](specs/CHECKPOINT_READS.md) | Bound parallel pending-write reads; separately evaluate one physical checkpoint load across request inspection/execution. | Parallelism alone does not reduce counts. Read reuse requires freshness, ownership and independent mutable state. Exit-time persistence is a separate durability decision. |
 | [4. Pending-write persistence](specs/PENDING_WRITE_PACKING.md) | Two multi-output tasks: six → two write HTTP requests, giving 38 → 34 total continuation requests if everything else is unchanged. | Plan A packs into two items and changes inspection/schema; Plan B requires a service batch API and keeps six items. Neither reduces the one-output-per-task probe's items through task packing. |
+| [5. Complete checkpoint materialization](specs/CHECKPOINT_MATERIALIZATION.md) | Avoid ancestor reads for newly saved DeltaChannel state; no reduction is predicted for this non-delta fixture. | Keep sync durability, pending writes and arbitrary-checkpoint recovery; measure larger snapshot bytes/CPU and service limits against fewer history reads. |
 
 The mock proves client-side call structure and checks restored state/closure. It does not demonstrate production latency savings, service reliability, real user isolation or crash recovery. [The result report](results/RESULTS.md) keeps measurements separate from these derived targets.
 
@@ -167,3 +178,7 @@ The mock proves client-side call structure and checks restored state/closure. It
 [write]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_foundry_checkpoint_saver.py#L339-L399
 [finish]: https://github.com/langchain-ai/langchain-azure/blob/d6befba95a86f55328b2e95eb61151a2f8889485/libs/azure-ai/langchain_azure_ai/agents/hosting/_responses_host.py#L971-L977
 [tags]: https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store?tabs=python#items
+[delta-messages]: https://github.com/langchain-ai/deepagents/blob/c6c340d47d2013a2e7b7230698f73977b7de6756/libs/deepagents/deepagents/graph.py#L72-L77
+[delta-files]: https://github.com/langchain-ai/deepagents/blob/c6c340d47d2013a2e7b7230698f73977b7de6756/libs/deepagents/deepagents/middleware/filesystem.py#L1297-L1301
+[delta-restore]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/langgraph/langgraph/pregel/_checkpoint.py#L502-L534
+[delta-history]: https://github.com/langchain-ai/langgraph/blob/41c9c22fdc83d68a2859d0c9a2b627c8615a792f/libs/checkpoint/langgraph/checkpoint/base/__init__.py#L680-L719

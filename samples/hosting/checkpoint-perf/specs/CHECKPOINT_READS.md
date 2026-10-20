@@ -30,6 +30,8 @@ This hosting-only change needs no new public option, backend batch API, LangGrap
 
 [Packing multiple outputs per task](PENDING_WRITE_PACKING.md) is a separate storage-format proposal. It targets fewer persisted items; bounded reads and request-scoped reuse do not require that change.
 
+[Complete checkpoint materialization](CHECKPOINT_MATERIALIZATION.md) separately targets DeltaChannel ancestor-history reconstruction. Reusing one requested tuple does not remove reads of distinct historical checkpoints required by the current delta representation.
+
 ## Optional follow-up: load once within a request
 
 For sequential conversation handling, use this flow: acquire exclusive thread ownership, establish the current checkpoint, load it and its pending writes once, inspect interrupts, then execute the graph from that loaded data. Keep existing durable writes and the final chain-store reference update. One load means one checkpoint reconstruction, not one HTTP request: pending-write items may still require multiple reads.
