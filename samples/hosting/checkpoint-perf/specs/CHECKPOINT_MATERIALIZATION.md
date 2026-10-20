@@ -1,4 +1,4 @@
-# Proposal: Materialize Complete State at Every Checkpoint
+# Proposal: Full Checkpoint Snapshots
 
 Status: proposed; no implementation or measured improvement. Source evidence establishes ancestor-read amplification; the performance benefit of full materialization still needs measurement. This is separate from [request-scoped read reuse](CHECKPOINT_READS.md) and [pending-write packing/batching](PENDING_WRITE_PACKING.md).
 

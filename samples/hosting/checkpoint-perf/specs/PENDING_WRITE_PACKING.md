@@ -1,4 +1,4 @@
-# Proposal: Pack Pending Writes per Task
+# Proposal: Pending-Write Packing and Batch Writes
 
 Status: proposed; no implementation or measured improvement. Source links pin hosting `d6befba`, AgentServer core `f00fb28c` and LangGraph `1.2.16`. Option A changes stored item format; Option B batches requests while retaining individual items. Both are separate from [checkpoint read optimization](CHECKPOINT_READS.md).
 
@@ -19,7 +19,7 @@ Targets assume no retries/conflicts, payloads within the service item-size limit
 
 Options A and B are alternative approaches for proposal 4; choose one for the delivery and measure it independently.
 
-## Option A: pack ordinary outputs per task
+## Option A: pending-write packing
 
 Store ordinary outputs for one task in a versioned item, with checkpoint/thread scope, task ID/path and an ordered list of original indices, channel names and serialized values. Keep different tasks and checkpoints separate. Start with ordinary outputs; retain separate replaceable items for special channels. Preserve the original indices even when splitting a mixed ordinary/special sequence.
 
@@ -29,7 +29,7 @@ A duplicate task key is not enough to skip the whole batch. Repeated calls can c
 
 Before writing, serialize and check the actual service item-size limit. Define a bounded, deterministic split or legacy-format fallback for oversized batches, including retry/conflict behavior across parts. Do not silently truncate outputs or weaken isolation, TTL, errors or cancellation cleanup. No new backend batch endpoint is presumed; identify any missing supported core contract separately.
 
-## Option B: batch writes without changing item format
+## Option B: batch writes
 
 If a supported service batch-write API is available, submit the existing per-output operations from each `aput_writes()` call in one batch. Keep current item keys, values, tags and readback unchanged. This avoids Option A's packed-format migration and preserves direct State Store inspection. Availability and the required semantics have not been confirmed; client-side parallel requests alone do not count as batching.
 

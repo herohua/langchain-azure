@@ -1,4 +1,4 @@
-# Proposal: Reduce Checkpoint Restoration Overhead
+# Proposal: Checkpoint Reads
 
 Status: proposed; no implementation or measured improvement. Source links pin hosting `d6befba`, AgentServer core `f00fb28c` and LangGraph `1.2.16`.
 
@@ -22,7 +22,7 @@ In the refreshed local baseline, each continuation has four item GETs: one chain
 
 Sections 3.1 and 3.2 are complementary and can coexist. Each can be delivered and measured separately; 3.1 does not depend on 3.2.
 
-## 3.1 Bounded concurrent reads
+## 3.1 Parallel pending-write reads
 
 In `_pending_writes()`, read item values concurrently within each listed page. Start with an internal limit of eight outstanding reads per invocation; eight is an initial bound to validate, not a measured optimum. Process one page at a time and avoid one task per key across all pages. Concurrent invocations can multiply traffic; this is not a saver-wide or service-wide limit.
 
@@ -32,9 +32,9 @@ This hosting-only change needs no new public option, backend batch API, LangGrap
 
 [Packing multiple outputs per task](PENDING_WRITE_PACKING.md) is a separate storage-format proposal. It targets fewer persisted items; bounded reads and request-scoped reuse do not require that change.
 
-[Complete checkpoint materialization](CHECKPOINT_MATERIALIZATION.md) separately targets DeltaChannel ancestor-history reconstruction. Reusing one requested tuple does not remove reads of distinct historical checkpoints required by the current delta representation.
+[Full checkpoint snapshots](CHECKPOINT_MATERIALIZATION.md) separately targets DeltaChannel ancestor-history reconstruction. Reusing one requested tuple does not remove reads of distinct historical checkpoints required by the current delta representation.
 
-## 3.2 Request-scoped checkpoint reuse
+## 3.2 Checkpoint reuse
 
 For sequential conversation handling, use this flow: acquire exclusive thread ownership, establish the current checkpoint, load it and its pending writes once, inspect interrupts, then execute the graph from that loaded data. Keep existing durable writes and the final chain-store reference update. One load means one checkpoint reconstruction, not one HTTP request: pending-write items may still require multiple reads.
 

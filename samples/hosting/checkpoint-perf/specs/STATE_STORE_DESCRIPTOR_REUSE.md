@@ -1,4 +1,4 @@
-# Proposal: Reuse State-Store Descriptors
+# Proposal: Descriptor Reuse
 
 Status: proposed; no implementation or measured improvement. Source links pin the local baseline: hosting `d6befba`, AgentServer core `f00fb28c`.
 

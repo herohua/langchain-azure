@@ -52,11 +52,11 @@ Run the same script in separate base/candidate environments with identical depen
 
 Use a small base/candidate/candidate/base sequence with separate output files and identical `--turns`, `--pending-writes`, and `--delay-ms`. Do not run `uv sync` after installing a candidate: it can restore the locked baseline. Record the source commits alongside the JSON results; package versions alone do not identify editable source changes. Compare corresponding turns and the pending-write probe.
 
-Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); less client or connection-pool setup with unchanged metadata refresh policy for [client/transport reuse](specs/STATE_STORE_CLIENT_REUSE.md), measured separately for pipelines, transports and sessions; higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
+Expected signals: fewer descriptor GETs with unchanged client construction for [descriptor reuse](specs/STATE_STORE_DESCRIPTOR_REUSE.md); less client or connection-pool setup with unchanged metadata refresh policy for [client reuse](specs/STATE_STORE_CLIENT_REUSE.md), measured separately for pipelines, transports and sessions; higher bounded read concurrency and lower read duration for [checkpoint reads](specs/CHECKPOINT_READS.md). HTTP call count need not fall with parallelism.
 
 A fourth proposal, [pending-write packing](specs/PENDING_WRITE_PACKING.md), targets six-to-two item writes for the two multi-output tasks in this fixture. It changes stored format and requires separate compatibility and idempotency validation; the current benchmark has not implemented or measured it.
 
-[Proposal 5: complete checkpoint materialization](specs/CHECKPOINT_MATERIALIZATION.md) addresses DeepAgents' default DeltaChannel history reconstruction, also possible in custom delta-backed graphs. Ordinary non-delta LangChain/LangGraph graphs and no-checkpointer requests do not have this path. It evaluates full state in each saved checkpoint while retaining sync durability and pending writes; a separate DeltaChannel benchmark is needed to measure the read/byte tradeoff.
+[Proposal 5: full checkpoint snapshots](specs/CHECKPOINT_MATERIALIZATION.md) addresses DeepAgents' default DeltaChannel history reconstruction, also possible in custom delta-backed graphs. Ordinary non-delta LangChain/LangGraph graphs and no-checkpointer requests do not have this path. It evaluates full state in each saved checkpoint while retaining sync durability and pending writes; a separate DeltaChannel benchmark is needed to measure the read/byte tradeoff.
 
 ## Hosted performance observations
 
