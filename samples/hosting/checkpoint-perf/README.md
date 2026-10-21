@@ -44,6 +44,30 @@ The ratio is not fixed. Pending-write volume, checkpoint restoration, pagination
 
 ## Compare an SDK change
 
+The updated POC stack can be assembled without an additional runtime patch:
+
+| Order | PR | Base | Scope |
+| --- | --- | --- | --- |
+| 1 | [#4](https://github.com/herohua/langchain-azure/pull/4) | main d6befba | Client/pool reuse and async store acquisition |
+| 2 | [#3](https://github.com/herohua/langchain-azure/pull/3) | #4 | Descriptor reuse and validation using each acquisition's fresh metadata |
+| 3 | [#2](https://github.com/herohua/langchain-azure/pull/2) | #3 | Checkpoint reuse with combined ownership/client cleanup |
+| 4 | [#5](https://github.com/herohua/langchain-azure/pull/5) | #2 | Request-local metadata cache under exclusive ownership |
+
+Fetch and merge those PR heads in order from a fresh d6befba worktree. They form
+a fast-forward chain. Descriptor reuse also needs core commit
+84861688b82551c21c8fae81ea78a673d34529fb from the
+[companion branch](https://github.com/herohua/azure-sdk-for-python/commit/84861688b82551c21c8fae81ea78a673d34529fb).
+Checkpoint/metadata reuse requires an enforced exclusive_access context; defaults
+retain ordinary reads. The cache also assumes no store deletion/recreation or
+configuration mutation during ownership. No distributed lock is included.
+
+The separate full-snapshot example must still use full-value channels and the
+same workload/dependency pins. Clean assembly reproduces the measured integration's
+executable hosting AST and two 11-turn example call-count checks. This is source
+and behavior equivalence, not a promise of identical future cloud latency. The
+non-delta harness below does not measure the full-snapshot benefit, and original
+single-POC gains must not be added.
+
 The requirements install this checkout's `libs/azure-ai` package in editable mode and pin the storage/Responses/LangGraph versions used by the local baseline. On Linux/macOS, replace `.venv/Scripts/python.exe` with `.venv/bin/python` in the commands. See [results](results/RESULTS.md) for the local baseline.
 
 The 2026-10-20 refresh uses upstream hosting `d6befba` (`1.2.11`), LangGraph `1.2.16`, AgentServer core `2.2.0` and Responses `2.3.0`. All three call-pattern issues remain. Continuations now make an extra latest-checkpoint lookup; see the [updated counts and explanation](results/RESULTS.md#what-changed).
