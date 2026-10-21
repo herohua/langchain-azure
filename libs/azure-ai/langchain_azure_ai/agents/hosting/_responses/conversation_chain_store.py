@@ -15,6 +15,8 @@ from azure.ai.agentserver.core.storage import (
 )
 from azure.core.credentials_async import AsyncTokenCredential
 
+from .._state_store_scope import _state_store, _store_descriptor
+
 CONVERSATION_CHAIN_STORE_PREFIX = "langchain_azure_ai.agents.hosting/responses"
 
 
@@ -144,7 +146,9 @@ class FoundryConversationChainStore:
     async def _validate_store(self, state_store: FoundryStateStore) -> None:
         if self._on_mismatch == "ignore":
             return
-        properties = await state_store.get()
+        properties = _store_descriptor(state_store)
+        if properties is None:
+            properties = await state_store.get()
         if properties.user_isolation != self._user_isolation:
             raise ValueError(
                 f"State store {state_store.name!r} already exists with "
@@ -176,7 +180,9 @@ class FoundryConversationChainStore:
             ValueError: Isolation or TTL differs and ``on_mismatch="fail"``.
             TypeError: The stored value is not a string dictionary.
         """
-        state_store = await FoundryStateStore.get_or_create(
+        async with _state_store(
+            self,
+            FoundryStateStore,
             self._store_name(conversation_chain_id),
             self._credential,
             self._endpoint,
@@ -187,8 +193,7 @@ class FoundryConversationChainStore:
             user_id=self._user_id,
             api_version=self._api_version,
             **self._kwargs,
-        )
-        async with state_store:
+        ) as state_store:
             await self._validate_store(state_store)
             item = await state_store.get_item(key)
         if item is None:
@@ -218,7 +223,9 @@ class FoundryConversationChainStore:
         Raises:
             ValueError: Isolation or TTL differs and ``on_mismatch="fail"``.
         """
-        state_store = await FoundryStateStore.get_or_create(
+        async with _state_store(
+            self,
+            FoundryStateStore,
             self._store_name(conversation_chain_id),
             self._credential,
             self._endpoint,
@@ -229,7 +236,6 @@ class FoundryConversationChainStore:
             user_id=self._user_id,
             api_version=self._api_version,
             **self._kwargs,
-        )
-        async with state_store:
+        ) as state_store:
             await self._validate_store(state_store)
             await state_store.set_item(key, dict(data))

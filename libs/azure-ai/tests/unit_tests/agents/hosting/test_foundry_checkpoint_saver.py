@@ -40,6 +40,12 @@ def _credential() -> AsyncTokenCredential:
 
 
 class _FakeStateStore:
+    async def __aenter__(self) -> _FakeStateStore:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.aclose()
+
     def __init__(self) -> None:
         self.name = "langGraphCheckpoints/thread-1"
         self.user_isolation = True
@@ -50,6 +56,7 @@ class _FakeStateStore:
         self.list_keys_calls: list[dict[str, Any]] = []
         self.closed = False
         self.deleted = False
+        self.resolved_descriptor: SimpleNamespace | None = None
 
     async def get(self) -> Any:
         return SimpleNamespace(
@@ -433,6 +440,45 @@ async def test_close_closes_owned_default_credential() -> None:
     credential.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting,value", [("user_isolation", False), ("item_ttl_seconds", 600)]
+)
+async def test_reuses_each_acquisition_descriptor_and_revalidates(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: Any,
+) -> None:
+    first = _FakeStateStore()
+    second = _FakeStateStore()
+    second.resolved_descriptor = SimpleNamespace(
+        user_isolation=True,
+        item_ttl_seconds=30 * 24 * 60 * 60,
+    )
+    setattr(second.resolved_descriptor, setting, value)
+    first.resolved_descriptor = SimpleNamespace(
+        user_isolation=True,
+        item_ttl_seconds=30 * 24 * 60 * 60,
+    )
+    read_properties = AsyncMock(side_effect=AssertionError("duplicate descriptor GET"))
+    monkeypatch.setattr(first, "get", read_properties)
+    monkeypatch.setattr(second, "get", read_properties)
+    acquire = AsyncMock(side_effect=[first, second])
+    with patch(
+        "langchain_azure_ai.agents.hosting._foundry_checkpoint_saver."
+        "FoundryStateStore.get_or_create",
+        new=acquire,
+    ):
+        saver = FoundryCheckpointSaver(_credential())
+        assert await saver.aget_tuple(_config()) is None
+        with pytest.raises(ValueError, match=setting):
+            await saver.aget_tuple(_config())
+    assert acquire.await_count == 2
+    read_properties.assert_not_awaited()
+    assert first.closed and second.closed
+    assert second.list_keys_calls == []
+
+
 @pytest.fixture
 def reuse_saver() -> Any:
     store = _FakeStateStore()
@@ -492,7 +538,12 @@ async def test_no_ownership_keeps_normal_reads(owned: bool | None) -> None:
     saver = FoundryCheckpointSaver(
         _credential(), exclusive_access=unavailable if owned is False else None
     )
-    with patch.object(saver, "_get_or_create_store", AsyncMock(return_value=store)):
+
+    @asynccontextmanager
+    async def acquire(*args: Any) -> Any:
+        yield store
+
+    with patch.object(saver, "_get_or_create_store", acquire):
         config = await saver.aput(_config(), _checkpoint("c1", "first"), {}, {})
         with patch.object(store, "get_item", wraps=store.get_item) as read:
             async with saver._request_scope():

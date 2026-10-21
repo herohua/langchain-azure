@@ -33,7 +33,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from contextlib import AsyncExitStack, nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -89,11 +89,25 @@ from ._responses import (
     HostingRunnableConfig,
     TaskStorageManager,
 )
+from ._state_store_scope import _state_store_scope
 
 if TYPE_CHECKING:
     from azure.ai.agentserver.responses.models import CreateResponse
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.types import Command, Interrupt
+
+
+@asynccontextmanager
+async def _closing_stream(
+    stream: AsyncIterator[Any],
+) -> AsyncIterator[AsyncIterator[Any]]:
+    try:
+        yield stream
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            await close()
+
 
 logger = logging.getLogger(__name__)
 
@@ -952,23 +966,23 @@ class ResponsesHostServer:
                     )
 
             active_interrupts: list["Interrupt"] = []
-            graph_stream = track_pending_interrupts(
+            async with _closing_stream(
                 self._graph.astream(
                     graph_input,
                     config=config,
                     stream_mode=self._stream_modes,
                     durability=self._durability,
-                ),
-                active_interrupts,
-            )
-            async for event in stream_graph_to_events(
-                graph_stream,
-                stream,
-                cancellation_signal=cancellation_signal,
-                shutdown_signal=context.shutdown,
-                usage=usage,
-            ):
-                yield event
+                )
+            ) as graph_stream:
+                graph_stream = track_pending_interrupts(graph_stream, active_interrupts)
+                async for event in stream_graph_to_events(
+                    graph_stream,
+                    stream,
+                    cancellation_signal=cancellation_signal,
+                    shutdown_signal=context.shutdown,
+                    usage=usage,
+                ):
+                    yield event
             checkpoint_ref = task_storage.checkpoint_ref
             if checkpoint_ref is not None:
                 await self._conversation_chain_store.set(
@@ -1067,13 +1081,15 @@ class ResponsesHostServer:
                 if isinstance(saver, FoundryCheckpointSaver)
                 else nullcontext()
             )
-            async with scope, AsyncExitStack() as cleanup:
-                events = self.handle_create(request, context, cancellation_signal)
-                close = getattr(events, "aclose", None)
-                if close is not None:
-                    cleanup.push_async_callback(close)
-                async for event in events:
-                    yield event
+            async with scope:
+                async with (
+                    _state_store_scope(),
+                    _closing_stream(
+                        self.handle_create(request, context, cancellation_signal)
+                    ) as events,
+                ):
+                    async for event in events:
+                        yield event
 
     # ------------------------------------------------------------------
     # Validation

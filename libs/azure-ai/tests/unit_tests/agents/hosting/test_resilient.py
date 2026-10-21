@@ -391,3 +391,62 @@ def test_hosting_runnable_config_wraps_all_hosting_data() -> None:
         "response_context": response_context,
         "response_cancellation_signal": cancellation_signal,
     }
+
+
+@pytest.mark.parametrize("policy", ["fail", "ignore"])
+@pytest.mark.parametrize("operation", ["get", "set"])
+@pytest.mark.parametrize(
+    "setting,value", [("user_isolation", True), ("item_ttl_seconds", 600)]
+)
+async def test_chain_reuses_fresh_acquisition_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+    operation: str,
+    setting: str,
+    value: Any,
+) -> None:
+    store_type = conversation_chain_store.FoundryStateStore
+    original_acquire = store_type.get_or_create
+    acquired: list[Any] = []
+
+    async def acquire(*args: Any, **kwargs: Any) -> Any:
+        state_store = await original_acquire(*args, **kwargs)
+        state_store.resolved_descriptor = await state_store.get()
+        if acquired:
+            setattr(state_store.resolved_descriptor, setting, value)
+        state_store.get = AsyncMock(
+            side_effect=AssertionError("duplicate descriptor GET")
+        )
+        acquired.append(state_store)
+        return state_store
+
+    monkeypatch.setattr(store_type, "get_or_create", acquire)
+    read_item = AsyncMock(return_value=None)
+    write_item = AsyncMock()
+    exit_store = AsyncMock(return_value=None)
+    monkeypatch.setattr(store_type, "get_item", read_item)
+    monkeypatch.setattr(store_type, "set_item", write_item)
+    monkeypatch.setattr(store_type, "__aexit__", exit_store)
+    store = FoundryConversationChainStore(on_mismatch=cast(Any, policy))
+    await store.get("chain-1", "missing")
+    read_item.reset_mock()
+
+    async def perform() -> None:
+        if operation == "get":
+            await store.get("chain-1", "key")
+        else:
+            await store.set("chain-1", "key", {"value": "stored"})
+
+    if policy == "fail":
+        with pytest.raises(ValueError, match=setting):
+            await perform()
+        read_item.assert_not_awaited()
+        write_item.assert_not_awaited()
+    else:
+        await perform()
+        assert read_item.await_count == (operation == "get")
+        assert write_item.await_count == (operation == "set")
+    assert len(acquired) == 2
+    assert exit_store.await_count == 2
+    for state_store in acquired:
+        state_store.get.assert_not_awaited()
