@@ -15,7 +15,7 @@ from azure.ai.agentserver.core.storage import (
 )
 from azure.core.credentials_async import AsyncTokenCredential
 
-from .._state_store_scope import _state_store
+from .._state_store_scope import _state_store, _store_descriptor
 
 CONVERSATION_CHAIN_STORE_PREFIX = "langchain_azure_ai.agents.hosting/responses"
 
@@ -146,7 +146,9 @@ class FoundryConversationChainStore:
     async def _validate_store(self, state_store: FoundryStateStore) -> None:
         if self._on_mismatch == "ignore":
             return
-        properties = await state_store.get()
+        properties = _store_descriptor(state_store)
+        if properties is None:
+            properties = await state_store.get()
         if properties.user_isolation != self._user_isolation:
             raise ValueError(
                 f"State store {state_store.name!r} already exists with "

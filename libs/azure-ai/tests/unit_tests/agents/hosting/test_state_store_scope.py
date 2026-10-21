@@ -208,8 +208,47 @@ async def test_scoped_saver_revalidates_settings_before_item_access(
             cast(Any, store).get.return_value.user_isolation = False
             await saver.aget_tuple(config)
     assert cast(Any, store).list_keys.await_count == 1
-    assert cast(Any, store).get.await_count == 4
+    assert cast(Any, store).get.await_count == 2
     cast(Any, store).aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("consumer", ["checkpoint", "chain"])
+async def test_descriptor_validation_uses_this_acquisitions_refresh(
+    clients: list[Any], consumer: str
+) -> None:
+    from langchain_azure_ai.agents.hosting._responses.conversation_chain_store import (
+        FoundryConversationChainStore,
+    )
+
+    owner = (
+        FoundryCheckpointSaver(credential=AsyncMock())
+        if consumer == "checkpoint"
+        else FoundryConversationChainStore(user_isolation=True)
+    )
+    good = SimpleNamespace(user_isolation=True, item_ttl_seconds=30 * 24 * 60 * 60)
+    async with _state_store_scope():
+        async with _state_store(
+            owner, FoundryStateStore, owner._store_name("thread")
+        ) as store:
+            cast(Any, store).resolved_descriptor = good
+            cast(Any, store).get.return_value = SimpleNamespace(
+                user_isolation=False, item_ttl_seconds=good.item_ttl_seconds
+            )
+            cast(Any, store).list_keys = AsyncMock(
+                return_value=SimpleNamespace(keys=[])
+            )
+            cast(Any, store).get_item = AsyncMock(return_value=None)
+        with pytest.raises(ValueError, match="user_isolation=False"):
+            if consumer == "checkpoint":
+                await cast(FoundryCheckpointSaver, owner).aget_tuple(
+                    {"configurable": {"thread_id": "thread"}}
+                )
+            else:
+                await cast(FoundryConversationChainStore, owner).get("thread", "key")
+        cast(Any, store).get.assert_awaited_once()
+        cast(Any, store).list_keys.assert_not_awaited()
+        cast(Any, store).get_item.assert_not_awaited()
+    clients[0].aclose.assert_awaited_once()
 
 
 async def test_failed_acquisition_closes_owned_session(
