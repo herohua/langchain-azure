@@ -251,6 +251,33 @@ async def test_descriptor_validation_uses_this_acquisitions_refresh(
     clients[0].aclose.assert_awaited_once()
 
 
+@pytest.mark.parametrize("resolved", [False, True])
+async def test_owned_scope_reuses_metadata_and_discards_it_at_exit(
+    clients: list[Any], resolved: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from langchain_azure_ai.agents.hosting._state_store_scope import _store_descriptor
+
+    owner = object()
+    descriptor = SimpleNamespace(user_isolation=True, item_ttl_seconds=600)
+    original = FoundryStateStore.get_or_create
+
+    async def acquire(*args: Any, **kwargs: Any) -> Any:
+        store = await original(*args, **kwargs)
+        cast(Any, store).resolved_descriptor = descriptor if resolved else None
+        cast(Any, store).get.return_value = descriptor
+        return store
+
+    monkeypatch.setattr(FoundryStateStore, "get_or_create", acquire)
+    for _ in range(2):
+        async with _state_store_scope(reuse_descriptors=True):
+            for _ in range(3):
+                async with _state_store(owner, FoundryStateStore, "store") as store:
+                    assert _store_descriptor(store) is descriptor
+        assert clients[-1].get.await_count == (0 if resolved else 1)
+        clients[-1].aclose.assert_awaited_once()
+    assert len(clients) == 2
+
+
 async def test_failed_acquisition_closes_owned_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

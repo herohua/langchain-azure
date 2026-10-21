@@ -160,6 +160,10 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
             ``True``. Ownership exceptions propagate to the caller.
             Defaults to ``None`` (no read reuse); a process-local lock is only
             sufficient when storage has no writers in other processes.
+            In ResponsesHostServer, an owned request also reuses its initial
+            State Store descriptors for checkpoint and conversation-chain
+            validation until request cleanup. Ownership must prevent store
+            deletion, recreation and configuration changes during that scope.
 
     Example:
         Supply a deployment's existing ownership context::

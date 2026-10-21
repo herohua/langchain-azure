@@ -25,10 +25,11 @@ _current_scope: ContextVar[_StateStoreScope | None] = ContextVar(
 
 
 class _StateStoreScope:
-    def __init__(self) -> None:
+    def __init__(self, reuse_descriptors: bool) -> None:
         self.stack = AsyncExitStack()
         self.clients: dict[tuple[object, str, str | None], FoundryStateStore] = {}
         self.descriptors: dict[int, Any] = {}
+        self.reuse_descriptors = reuse_descriptors
         self.locks: dict[tuple[object, str, str | None], asyncio.Lock] = {}
         self.idle = asyncio.Event()
         self.idle.set()
@@ -49,6 +50,8 @@ class _StateStoreScope:
         async with self.locks.setdefault(key, asyncio.Lock()):
             store = self.clients.get(key)
             if store is not None:
+                if self.reuse_descriptors:
+                    return store
                 try:
                     # Validation consumes this acquisition's fresh metadata.
                     self.descriptors[id(store)] = await store.get()
@@ -74,6 +77,11 @@ class _StateStoreScope:
             )
             self.stack.push_async_callback(store.aclose)
             self.clients[key] = store
+            if self.reuse_descriptors:
+                descriptor = getattr(store, "resolved_descriptor", None)
+                self.descriptors[id(store)] = (
+                    descriptor if descriptor is not None else await store.get()
+                )
             return store
 
 
@@ -85,8 +93,8 @@ def _store_descriptor(store: FoundryStateStore) -> Any:
 
 
 @asynccontextmanager
-async def _state_store_scope() -> AsyncIterator[None]:
-    scope = _StateStoreScope()
+async def _state_store_scope(*, reuse_descriptors: bool = False) -> AsyncIterator[None]:
+    scope = _StateStoreScope(reuse_descriptors)
     token = _current_scope.set(scope)
     try:
         yield

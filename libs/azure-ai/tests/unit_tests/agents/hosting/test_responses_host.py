@@ -249,6 +249,74 @@ async def test_checkpoint_scope_closes_handler_before_releasing_ownership(
     assert order == ["closed", "client_closed", "released"]
 
 
+@pytest.mark.parametrize("owned", [None, False, True])
+@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "close"])
+async def test_metadata_reuse_requires_ownership_and_ends_with_request(
+    monkeypatch: pytest.MonkeyPatch, owned: bool | None, ending: str
+) -> None:
+    from azure.ai.agentserver.core.storage import FoundryStateStore
+
+    from langchain_azure_ai.agents.hosting._state_store_scope import (
+        _state_store,
+        _store_descriptor,
+    )
+
+    @asynccontextmanager
+    async def ownership() -> AsyncGenerator[bool, None]:
+        yield owned is True
+
+    created = []
+
+    async def acquire(*args: Any, **kwargs: Any) -> Any:
+        store = SimpleNamespace(
+            resolved_descriptor=object(),
+            get=AsyncMock(return_value=object()),
+            aclose=AsyncMock(),
+        )
+        created.append(store)
+        return store
+
+    monkeypatch.setattr(FoundryStateStore, "get_or_create", acquire)
+    saver = FoundryCheckpointSaver(
+        cast(Any, object()), exclusive_access=ownership if owned is not None else None
+    )
+    graph = make_checkpointed_echo_graph()
+    graph.checkpointer = saver
+    server = ResponsesHostServer(graph)
+
+    async def handler(*args: Any) -> AsyncGenerator[Any, None]:
+        async with _state_store(server, FoundryStateStore, "chain") as store:
+            first = _store_descriptor(store)
+        async with _state_store(server, FoundryStateStore, "chain") as store:
+            assert (_store_descriptor(store) is first) == (owned is True)
+        yield {"type": "probe"}
+        if ending == "failure":
+            raise RuntimeError("failed")
+        if ending == "cancel":
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(server, "handle_create", handler)
+    for _ in range(2):
+        events = server._handle_create_async_gen(
+            _request(), _context(), asyncio.Event()
+        )
+        await anext(events)
+        if ending == "close":
+            await events.aclose()
+        else:
+            expected = {
+                "success": StopAsyncIteration,
+                "failure": RuntimeError,
+                "cancel": asyncio.CancelledError,
+            }[ending]
+            with pytest.raises(expected):
+                await anext(events)
+        assert created[-1].get.await_count == (0 if owned is True else 1)
+        created[-1].aclose.assert_awaited_once()
+    assert len(created) == 2
+    assert saver._active_read_scope() is None
+
+
 def test_constructor_registers_responses_features() -> None:
     with patch(
         "langchain_azure_ai.agents.hosting._responses_host."
