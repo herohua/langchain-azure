@@ -98,7 +98,7 @@ async def test_handler_owns_clients_through_generator_exit(
     assert await anext(events) == "admitted"
     store.aclose.assert_not_awaited()
     if ending == "close":
-        await events.aclose()
+        await cast(AsyncGenerator[Any, None], events).aclose()
     else:
         expected = {
             "success": StopAsyncIteration,
