@@ -353,17 +353,20 @@ async def _http_storage() -> Any:
     app.router.add_route("*", "/{path:.*}", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    try:
-        # Bind an explicit socket so the assigned port is obtained publicly.
-        import socket
+    # Keep the listener alive until aiohttp finishes deregistering it.
+    import socket
 
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            listener.listen()
-            await web.SockSite(runner, listener).start()
-            yield f"http://127.0.0.1:{listener.getsockname()[1]}/", requests
+    listener = socket.socket()
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        await web.SockSite(runner, listener).start()
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}/", requests
     finally:
-        await runner.cleanup()
+        try:
+            await runner.cleanup()
+        finally:
+            listener.close()
 
 
 async def test_real_transport_pool_headers_and_borrower_close(

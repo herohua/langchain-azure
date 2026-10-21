@@ -411,11 +411,16 @@ async def test_chain_reuses_fresh_acquisition_descriptor(
 
     async def acquire(*args: Any, **kwargs: Any) -> Any:
         state_store = await original_acquire(*args, **kwargs)
-        state_store.resolved_descriptor = await state_store.get()
+        descriptor = await state_store.get()
+        monkeypatch.setattr(
+            state_store, "resolved_descriptor", descriptor, raising=False
+        )
         if acquired:
-            setattr(state_store.resolved_descriptor, setting, value)
-        state_store.get = AsyncMock(
-            side_effect=AssertionError("duplicate descriptor GET")
+            setattr(descriptor, setting, value)
+        monkeypatch.setattr(
+            state_store,
+            "get",
+            AsyncMock(side_effect=AssertionError("duplicate descriptor GET")),
         )
         acquired.append(state_store)
         return state_store
