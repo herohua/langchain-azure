@@ -200,7 +200,13 @@ async def test_checkpoint_scope_spans_reference_selection_through_update(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_scope_closes_handler_before_releasing_ownership() -> None:
+async def test_checkpoint_scope_closes_handler_before_releasing_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from azure.ai.agentserver.core.storage import FoundryStateStore
+
+    from langchain_azure_ai.agents.hosting._state_store_scope import _state_store
+
     order = []
 
     @asynccontextmanager
@@ -210,6 +216,14 @@ async def test_checkpoint_scope_closes_handler_before_releasing_ownership() -> N
         finally:
             order.append("released")
 
+    async def close_store() -> None:
+        assert saver._active_read_scope() is not None
+        order.append("client_closed")
+
+    store = SimpleNamespace(get=AsyncMock(), aclose=AsyncMock(side_effect=close_store))
+    monkeypatch.setattr(
+        FoundryStateStore, "get_or_create", AsyncMock(return_value=store)
+    )
     saver = FoundryCheckpointSaver(
         cast(Any, object()), exclusive_access=exclusive_access
     )
@@ -218,6 +232,8 @@ async def test_checkpoint_scope_closes_handler_before_releasing_ownership() -> N
     server = ResponsesHostServer(graph)
 
     async def handler(*args: Any) -> AsyncGenerator[Any, None]:
+        async with _state_store(server, FoundryStateStore, "chain"):
+            pass
         try:
             yield {"type": "probe"}
         finally:
@@ -230,7 +246,7 @@ async def test_checkpoint_scope_closes_handler_before_releasing_ownership() -> N
         )
         await anext(events)
         await events.aclose()
-    assert order == ["closed", "released"]
+    assert order == ["closed", "client_closed", "released"]
 
 
 def test_constructor_registers_responses_features() -> None:
