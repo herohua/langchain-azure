@@ -28,6 +28,7 @@ class _StateStoreScope:
     def __init__(self) -> None:
         self.stack = AsyncExitStack()
         self.clients: dict[tuple[object, str, str | None], FoundryStateStore] = {}
+        self.descriptors: dict[int, Any] = {}
         self.locks: dict[tuple[object, str, str | None], asyncio.Lock] = {}
         self.idle = asyncio.Event()
         self.idle.set()
@@ -49,8 +50,8 @@ class _StateStoreScope:
             store = self.clients.get(key)
             if store is not None:
                 try:
-                    # Replace get_or_create's metadata read, never cache descriptors.
-                    await store.get()
+                    # Validation consumes this acquisition's fresh metadata.
+                    self.descriptors[id(store)] = await store.get()
                     return store
                 except FoundryStorageNotFoundError:
                     # Other borrowers may still be using it; close at scope exit.
@@ -74,6 +75,13 @@ class _StateStoreScope:
             self.stack.push_async_callback(store.aclose)
             self.clients[key] = store
             return store
+
+
+def _store_descriptor(store: FoundryStateStore) -> Any:
+    scope = _current_scope.get()
+    if scope is not None and id(store) in scope.descriptors:
+        return scope.descriptors[id(store)]
+    return getattr(store, "resolved_descriptor", None)
 
 
 @asynccontextmanager

@@ -40,7 +40,7 @@ from langchain_azure_ai.agents.hosting import (
     _add_process_hosting_features,
 )
 
-from ._state_store_scope import _state_store
+from ._state_store_scope import _state_store, _store_descriptor
 
 DEFAULT_STORE_NAME_PREFIX = "langchain_azure_ai.agents.hosting.FoundryCheckpointSaver"
 DEFAULT_ITEM_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -436,7 +436,7 @@ class FoundryCheckpointSaver(BaseCheckpointSaver):
             # opt-out are evaluated per request.
             get_server_version=get_user_agent,
         ) as store:
-            properties = getattr(store, "resolved_descriptor", None)
+            properties = _store_descriptor(store)
             if properties is None:
                 properties = await store.get()
             if properties.user_isolation != self._user_isolation:
