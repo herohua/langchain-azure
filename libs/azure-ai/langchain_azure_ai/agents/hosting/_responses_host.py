@@ -1082,8 +1082,15 @@ class ResponsesHostServer:
                 else nullcontext()
             )
             async with scope:
+                owned = (
+                    saver._active_read_scope()
+                    if isinstance(saver, FoundryCheckpointSaver)
+                    else None
+                )
                 async with (
-                    _state_store_scope(),
+                    _state_store_scope(
+                        reuse_descriptors=owned is not None and owned.enabled,
+                    ),
                     _closing_stream(
                         self.handle_create(request, context, cancellation_signal)
                     ) as events,
