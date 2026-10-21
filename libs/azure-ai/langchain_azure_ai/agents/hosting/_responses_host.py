@@ -32,8 +32,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import asynccontextmanager, nullcontext
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -1071,16 +1071,25 @@ class ResponsesHostServer:
         request: CreateResponse,
         context: ResponseContext,
         cancellation_signal: asyncio.Event,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         with _hosting_feature_scope(self._hosting_features):
-            async with (
-                _state_store_scope(),
-                _closing_stream(
-                    self.handle_create(request, context, cancellation_signal)
-                ) as events,
-            ):
-                async for event in events:
-                    yield event
+            from ._foundry_checkpoint_saver import FoundryCheckpointSaver
+
+            saver = getattr(self._graph, "checkpointer", None)
+            scope = (
+                saver._request_scope()
+                if isinstance(saver, FoundryCheckpointSaver)
+                else nullcontext()
+            )
+            async with scope:
+                async with (
+                    _state_store_scope(),
+                    _closing_stream(
+                        self.handle_create(request, context, cancellation_signal)
+                    ) as events,
+                ):
+                    async for event in events:
+                        yield event
 
     # ------------------------------------------------------------------
     # Validation

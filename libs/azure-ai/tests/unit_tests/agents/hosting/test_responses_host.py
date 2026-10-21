@@ -11,6 +11,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -34,6 +35,7 @@ from langgraph.types import Command, Interrupt
 from starlette.testclient import TestClient
 
 from langchain_azure_ai.agents.hosting import (
+    FoundryCheckpointSaver,
     HostingFeature,
     ResponsesHostServer,
     ResponsesServerOptions,
@@ -110,6 +112,141 @@ async def test_handler_owns_clients_through_generator_exit(
     assert settled == [True]
     assert acquire.await_count == 1
     store.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovering", [False, True])
+async def test_checkpoint_scope_spans_reference_selection_through_update(
+    recovering: bool,
+) -> None:
+    from .test_foundry_checkpoint_saver import _FakeStateStore
+
+    store = _FakeStateStore()
+    owned = False
+
+    @asynccontextmanager
+    async def exclusive_access() -> AsyncGenerator[bool, None]:
+        nonlocal owned
+        owned = True
+        try:
+            yield True
+        finally:
+            owned = False
+
+    saver = FoundryCheckpointSaver(
+        cast(Any, object()), exclusive_access=exclusive_access
+    )
+    graph = make_checkpointed_echo_graph()
+    graph.checkpointer = saver
+    chain = MagicMock()
+
+    async def update(*args: Any) -> None:
+        assert owned
+        assert saver._active_read_scope() is not None
+
+    chain.get = AsyncMock(return_value=None)
+    chain.set = AsyncMock(side_effect=update)
+    server = ResponsesHostServer(graph, conversation_chain_store=chain)
+    context = _context()
+    request = _request(conversation="conv-test")
+
+    @asynccontextmanager
+    async def acquire(*args: Any) -> Any:
+        yield store
+
+    with patch.object(saver, "_get_or_create_store", acquire):
+        config: RunnableConfig = {"configurable": {"thread_id": "thread-1"}}
+        await graph.ainvoke(
+            {"messages": [("user", "first")]}, config, durability="sync"
+        )
+        state = await graph.aget_state(config)
+        if recovering:
+            context.is_recovery = True
+            context.persisted_response = _response_object(
+                context.response_id,
+                internal_metadata={
+                    METADATA_LANGGRAPH_THREAD_ID: "thread-1",
+                    METADATA_LANGGRAPH_CHECKPOINT_ID: state.config["configurable"][
+                        "checkpoint_id"
+                    ],
+                },
+            )
+        else:
+            chain.get = AsyncMock(
+                return_value={
+                    "thread_id": "thread-1",
+                    "checkpoint_id": state.config["configurable"]["checkpoint_id"],
+                }
+            )
+        original = chain.get
+
+        async def reference(*args: Any) -> Any:
+            assert owned
+            return await original(*args)
+
+        chain.get = AsyncMock(side_effect=reference)
+        with patch.object(store, "get_item", wraps=store.get_item) as read:
+            events = [
+                event
+                async for event in server._handle_create_async_gen(
+                    request, context, asyncio.Event()
+                )
+            ]
+        assert events[-1]["type"] == "response.completed"
+        assert read.await_count == 1
+        chain.set.assert_awaited_once()
+    assert not owned
+    assert saver._active_read_scope() is None
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_scope_closes_handler_before_releasing_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from azure.ai.agentserver.core.storage import FoundryStateStore
+
+    from langchain_azure_ai.agents.hosting._state_store_scope import _state_store
+
+    order = []
+
+    @asynccontextmanager
+    async def exclusive_access() -> AsyncGenerator[bool, None]:
+        try:
+            yield True
+        finally:
+            order.append("released")
+
+    async def close_store() -> None:
+        assert saver._active_read_scope() is not None
+        order.append("client_closed")
+
+    store = SimpleNamespace(get=AsyncMock(), aclose=AsyncMock(side_effect=close_store))
+    monkeypatch.setattr(
+        FoundryStateStore, "get_or_create", AsyncMock(return_value=store)
+    )
+    saver = FoundryCheckpointSaver(
+        cast(Any, object()), exclusive_access=exclusive_access
+    )
+    graph = make_checkpointed_echo_graph()
+    graph.checkpointer = saver
+    server = ResponsesHostServer(graph)
+
+    async def handler(*args: Any) -> AsyncGenerator[Any, None]:
+        async with _state_store(server, FoundryStateStore, "chain"):
+            pass
+        try:
+            yield {"type": "probe"}
+        finally:
+            assert saver._active_read_scope() is not None
+            order.append("closed")
+
+    with patch.object(server, "handle_create", handler):
+        events = server._handle_create_async_gen(
+            _request(), _context(), asyncio.Event()
+        )
+        await anext(events)
+        await events.aclose()
+    assert order == ["closed", "client_closed", "released"]
 
 
 def test_constructor_registers_responses_features() -> None:
