@@ -1,0 +1,7 @@
+{
+  "conversation": "<existing-conversation-id>",
+  "input": "<application request>",
+  "background": true,
+  "store": true,
+  "stream": false
+}
