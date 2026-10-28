@@ -425,7 +425,7 @@ Azure AI Content Understanding is also available as a document loader via `Azure
 
 - **1.2.1**:
 
-    - You can now use `context_extractor` argument in classes `langchain_azure_ai.agents.middleware.` to configre how middleware instract extract content from your state.
+    - You can now use `context_extractor` argument in classes `langchain_azure_ai.agents.middleware.` to configure how middleware instract extract content from your state.
     - We changed the default implementation of `init_chat_model("azure_ai:<your-model>")` to use OpenAI Responses API (this is also the default if using `langchain>=1.2.3`).
 
 - **1.2.0**:
@@ -470,7 +470,7 @@ Azure AI Content Understanding is also available as a document loader via `Azure
 
 - **1.0.2**:
 
-    - We updated the `AzureAIOpenTelemetryTracer` to create a parent trace for multi agent scenarios. Previously, you were required to do this manually, which was unnecesary.
+    - We updated the `AzureAIOpenTelemetryTracer` to create a parent trace for multi agent scenarios. Previously, you were required to do this manually, which was unnecessary.
 
 - **1.0.0**:
 
