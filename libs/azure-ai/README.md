@@ -194,6 +194,15 @@ or the [hosted-agent samples](https://github.com/langchain-ai/langchain-azure/bl
 
 For platform configuration and deployment examples, see the [Foundry LangGraph samples](https://github.com/microsoft-foundry/foundry-samples/tree/main/samples/python/hosted-agents/langgraph).
 
+The package also ships a `host-langchain-on-foundry` agent skill that guides a
+coding agent through these hosting decisions. Copy it into your coding agent's
+skills directory, for example `.github/skills/` or `.claude/skills/`. This
+prints its installed location:
+
+```bash
+python -c "import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec('langchain_azure_ai').origin).parent / 'agents' / 'hosting' / 'skills' / 'host-langchain-on-foundry')"
+```
+
 You can also host the graph directly from Python, as shown below.
 For a Responses API host, install the hosting extra. It includes
 the Agent Server version that uses a local file-backed ``FoundryStateStore``
