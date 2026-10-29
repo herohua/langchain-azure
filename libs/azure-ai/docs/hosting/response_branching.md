@@ -40,17 +40,18 @@ other graph state. Each reusable response points to its own final checkpoint.
 A **root response** has no parent. A **child response** selects a parent using
 `previous_response_id`.
 
-Suppose A suggests a destination. You can ask for two different plans from A:
+Suppose response A suggests a destination. Two follow-up requests use A as
+their parent, producing responses B and C:
 
 ```text
-A: Suggest a destination.
-|-- B: Plan a busy itinerary.
-`-- C: Plan a relaxed itinerary.
+Response A: Destination suggestion.
+|-- Response B: Busy itinerary.
+`-- Response C: Relaxed itinerary.
 ```
 
-Both B and C use `previous_response_id=A.id`. Each starts from A's exact
-checkpoint, even if B has already finished when C starts. C does not inherit
-B's changes, and A's saved state stays unchanged.
+Both follow-up requests use `previous_response_id=A.id`. Each starts from A's
+exact checkpoint, even if B has already finished when C starts. C does not
+inherit B's changes, and A's saved state stays unchanged.
 
 The branches share a LangGraph thread, with separate checkpoint histories.
 For response-ID branching, the host restores graph state directly; it does not
