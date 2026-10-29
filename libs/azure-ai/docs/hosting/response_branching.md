@@ -2,7 +2,9 @@
 
 Response branching brings
 [LangGraph time travel](https://docs.langchain.com/oss/python/langgraph/use-time-travel)
-to response boundaries. LangGraph lets applications select checkpoints within
+to response boundaries, following the
+[OpenAI Responses API's behavior for linking responses](https://developers.openai.com/api/docs/guides/conversation-state#passing-context-from-the-previous-response).
+LangGraph lets applications select checkpoints within
 a graph execution to replay or fork. Here, you select an earlier stored response,
 called the **parent**, using `previous_response_id`. The host restores the
 checkpoint where its graph finished and processes your new input. Use it to
