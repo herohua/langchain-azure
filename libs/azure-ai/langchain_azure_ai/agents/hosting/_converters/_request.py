@@ -21,6 +21,7 @@ from langchain_core.messages import (
     AIMessage,
     AnyMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -29,6 +30,8 @@ from langchain_core.messages.tool import ToolCall
 from ._hitl import hitl_call_ids
 
 logger = logging.getLogger(__name__)
+
+_REQUEST_INSTRUCTIONS_PREFIX = "__langchain_azure_request_instructions:"
 
 _ROLE_TO_MESSAGE_CLS: dict[
     str, type[HumanMessage] | type[SystemMessage] | type[AIMessage]
@@ -206,6 +209,7 @@ def build_messages_input(
     *,
     instructions: str | None = None,
     skip_call_ids: Iterable[str] = (),
+    instructions_id: str | None = None,
 ) -> dict[str, list[AnyMessage]]:
     """Build a ``{"messages": [...]}`` LangGraph input from resolved items.
 
@@ -227,13 +231,14 @@ def build_messages_input(
         instructions: Optional system instructions from the request.
         skip_call_ids: Forwarded to :func:`items_to_messages`. Used by the
             HITL resume path to filter out the resume ``function_call_output``.
+        instructions_id: Optional identity for request-scoped instructions.
 
     Returns:
         The ``{"messages": [...]}`` payload accepted by ``MessagesState`` graphs.
     """
     messages: list[AnyMessage] = []
     if instructions:
-        messages.append(SystemMessage(content=instructions))
+        messages.append(SystemMessage(content=instructions, id=instructions_id))
     messages.extend(
         _filter_incomplete_tool_calls(
             items_to_messages(items, skip_call_ids=skip_call_ids)
@@ -285,6 +290,21 @@ def _filter_incomplete_tool_calls(messages: Sequence[AnyMessage]) -> list[AnyMes
         else:
             result.append(msg)
     return result
+
+
+def _remove_request_instructions(
+    graph_input: dict[str, Any], parent_messages: Sequence[AnyMessage]
+) -> dict[str, Any]:
+    removals = [
+        RemoveMessage(id=message.id)
+        for message in parent_messages
+        if isinstance(message, SystemMessage)
+        and message.id is not None
+        and message.id.startswith(_REQUEST_INSTRUCTIONS_PREFIX)
+    ]
+    if not removals:
+        return graph_input
+    return {**graph_input, "messages": removals + list(graph_input.get("messages", []))}
 
 
 def _tool_call_id(tc: Any) -> str | None:
