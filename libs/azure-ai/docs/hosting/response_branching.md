@@ -18,25 +18,8 @@ and [conversation-state guide](https://developers.openai.com/api/docs/guides/con
 The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
 provides the client usage baseline; the API reference defines the field semantics.
 
-This specification does not require the default host to expose `/conversations`
-or its item-management routes. The `/responses` request field `conversation`
-references an existing conversation resolved by the configured provider or
-platform. Creating and managing that resource is outside this API path's scope.
-
-- `previous_response_id` selects a specific response, not a thread's latest state.
-- `conversation` identifies a separate persistent conversation resource. It is
-  not a response ID. Lookup and parent selection follow ordinary continuation.
-- `previous_response_id` and `conversation` are mutually exclusive.
-- Request `store` controls response retention and defaults to `True`. Enabling
-  branching must not silently override `store=False`. See
-  [Request store behavior](#request-store-behavior) for response retention.
-- Tool outputs and approval decisions are valid continuation inputs. A graph
-  pause alone must not cause an otherwise valid protocol request to be rejected.
-- With `previous_response_id`, a previous response's top-level `instructions`
-  are not carried over. Clients resend instructions they want on each turn.
-
-Checkpoint selection is an internal execution strategy. It must preserve these
-public semantics rather than introduce a separate client protocol.
+This design does not expose LangGraph Agent Server graph management APIs or
+OpenAI's Conversations API.
 
 ## The basic idea
 
@@ -149,6 +132,27 @@ With `enable_response_branching=True`, three requirements are mandatory:
 - If the required checkpoint reference or checkpoint is missing, mismatched, or
   unreadable, fail before graph execution. Do not fall back to message-history
   reconstruction, a latest checkpoint, or a new root response.
+
+### OpenAI request semantics
+
+The `/responses` request field `conversation` references an existing conversation
+resolved by the configured provider or platform. Creating and managing that
+resource is outside this API path's scope.
+
+- `previous_response_id` selects a specific response, not a thread's latest state.
+- `conversation` identifies a separate persistent conversation resource. It is
+  not a response ID. Lookup and parent selection follow ordinary continuation.
+- `previous_response_id` and `conversation` are mutually exclusive.
+- Request `store` controls response retention and defaults to `True`. Enabling
+  branching must not silently override `store=False`. See
+  [Request store behavior](#request-store-behavior) for response retention.
+- Tool outputs and approval decisions are valid continuation inputs. A graph
+  pause alone must not cause an otherwise valid protocol request to be rejected.
+- With `previous_response_id`, a previous response's top-level `instructions`
+  are not carried over. Clients resend instructions they want on each turn.
+
+Checkpoint selection is an internal execution strategy. It must preserve these
+public semantics rather than introduce a separate client protocol.
 
 ### Parent eligibility
 
