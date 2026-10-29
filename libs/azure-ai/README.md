@@ -272,6 +272,10 @@ To create independent children of a completed response instead, set
 `previous_response_id`. Each child restores the parent's exact saved checkpoint,
 not the thread's latest state. Branching requires a history-preserving async
 checkpointer, an adapter-owned host, and steering disabled.
+The parent must have no outstanding tool calls, approvals, or graph interrupts.
+With branching enabled, response-ID requests reject paused parents even when
+the input contains tool results or approval replies. Conversation-based
+continuation keeps its existing behavior.
 
 Branch selection runs inside the response handler. Invalid parents fail before
 graph execution through the existing response error stream. HTTP admission

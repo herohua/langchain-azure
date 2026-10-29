@@ -359,9 +359,9 @@ class ResponsesHostServer:
         enable_response_branching: Restore the exact completed parent checkpoint
             for new ``previous_response_id`` requests. Defaults to ``False``.
             Requires a history-preserving asynchronous checkpointer, ``app=None``,
-            and steering disabled. Tool and approval replies keep the existing
-            continuation path. Invalid parents fail before graph
-            execution through the existing response error stream.
+            and steering disabled. Conversation requests keep their existing
+            continuation path. Parents with pending tasks or interrupts fail
+            before graph execution through the existing response error stream.
         prefix: URL prefix for response routes (e.g. ``"/v1"``).
         applicationinsights_connection_string: Forwarded to
             :class:`AgentServerHost`.
@@ -720,7 +720,7 @@ class ResponsesHostServer:
         Returns:
             A ``RunnableConfig`` dict.
         """
-        if await self._uses_response_branching(request, context):
+        if self._uses_response_branching(request, context):
             reference = await select_branch_checkpoint(request, context)
             return HostingRunnableConfig.create_from_checkpoint(
                 reference, context
@@ -752,7 +752,7 @@ class ResponsesHostServer:
             hosting_config = hosting_config.with_checkpoint_ref(checkpoint_ref)
         return hosting_config.runnable_config
 
-    async def _uses_response_branching(
+    def _uses_response_branching(
         self, request: CreateResponse, context: ResponseContext
     ) -> bool:
         return (
@@ -760,10 +760,6 @@ class ResponsesHostServer:
             and not context.is_recovery
             and request.get("previous_response_id") is not None
             and not (get_conversation_id(request) or context.conversation_id)
-            and not any(
-                item.get("type") in {"function_call_output", "mcp_approval_response"}
-                for item in await context.get_input_items()
-            )
         )
 
     async def _resolve_thread_config(
@@ -995,7 +991,7 @@ class ResponsesHostServer:
             branch_state = None
             graph = self._graph
             # shortcut: keep existing recovery until response-owned recovery lands.
-            branch_execution = await self._uses_response_branching(request, context)
+            branch_execution = self._uses_response_branching(request, context)
             if branch_execution:
                 reference = await select_branch_checkpoint(request, context)
                 graph = copy(graph)

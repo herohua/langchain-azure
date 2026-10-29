@@ -250,7 +250,12 @@ def test_unfinished_response_is_not_a_parent(status: str, stream: bool) -> None:
 
 
 @pytest.mark.parametrize("static_pause", [False, True])
-def test_paused_graph_is_not_a_branch_parent(static_pause: bool) -> None:
+@pytest.mark.parametrize(
+    "reply_kind", ["text", "function_call_output", "mcp_approval_response"]
+)
+def test_paused_graph_is_not_a_branch_parent(
+    static_pause: bool, reply_kind: str
+) -> None:
     runs = []
 
     async def pause(state: MessagesState) -> dict[str, Any]:
@@ -272,8 +277,42 @@ def test_paused_graph_is_not_a_branch_parent(static_pause: bool) -> None:
     with TestClient(server.app) as client:
         parent = _create(client, input="A")
         original_runs = list(runs)
+        graph_input: Any = "B"
+        if reply_kind == "function_call_output":
+            call_id = next(
+                (
+                    item["call_id"]
+                    for item in parent["output"]
+                    if item["type"] == "function_call"
+                ),
+                "unanswered-call",
+            )
+            graph_input = [
+                {
+                    "type": reply_kind,
+                    "call_id": call_id,
+                    "output": json.dumps({"resume": "answered"}),
+                }
+            ]
+        elif reply_kind == "mcp_approval_response":
+            approval_id = next(
+                (
+                    item["id"]
+                    for item in parent["output"]
+                    if item["type"] == "mcp_approval_request"
+                ),
+                "unanswered-approval",
+            )
+            graph_input = [
+                {
+                    "type": reply_kind,
+                    "approval_request_id": approval_id,
+                    "approve": True,
+                }
+            ]
         rejected = client.post(
-            "/responses", json={"input": "B", "previous_response_id": parent["id"]}
+            "/responses",
+            json={"input": graph_input, "previous_response_id": parent["id"]},
         )
         assert rejected.status_code == 200
         assert rejected.json()["status"] == "failed"
@@ -622,9 +661,10 @@ def test_hosted_default_provider_remains_available(
     assert _text(child) == "A|B"
 
 
-@pytest.mark.parametrize("kind", ["conversation", "tool_result", "approval"])
+@pytest.mark.parametrize("kind", ["text", "tool_result", "approval"])
+@pytest.mark.parametrize("branching", [False, True])
 async def test_ordinary_continuation_keeps_chain_checkpoint(
-    kind: str, monkeypatch: pytest.MonkeyPatch
+    kind: str, branching: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = InMemoryResponseProvider()
     lookup = AsyncMock()
@@ -635,15 +675,19 @@ async def test_ordinary_continuation_keeps_chain_checkpoint(
         _graph([]),
         store=provider,
         conversation_chain_store=chain,
-        enable_response_branching=True,
+        enable_response_branching=branching,
     )
     request = cast(
         CreateResponse,
-        {"input": "next", "conversation": "conversation"}
-        if kind == "conversation"
-        else {
-            "previous_response_id": "parent",
-            "input": [
+        {
+            **(
+                {"conversation": "conversation"}
+                if branching
+                else {"previous_response_id": "parent"}
+            ),
+            "input": "next"
+            if kind == "text"
+            else [
                 {"type": "function_call_output", "call_id": "call", "output": "result"}
                 if kind == "tool_result"
                 else {
@@ -658,7 +702,7 @@ async def test_ordinary_continuation_keeps_chain_checkpoint(
         response_id="current",
         request=request,
         previous_response_id=request.get("previous_response_id"),
-        conversation_id="conversation" if kind == "conversation" else None,
+        conversation_id="conversation" if branching else None,
         mode_flags=ResponseModeFlags(stream=False, store=True, background=False),
         provider=provider,
     )
