@@ -5,18 +5,10 @@ Response branching brings
 to response boundaries, following the
 [OpenAI Responses API's behavior for linking responses](https://developers.openai.com/api/docs/guides/conversation-state#passing-context-from-the-previous-response).
 LangGraph lets applications select checkpoints within
-a graph execution to replay or fork. Here, you select an earlier stored response,
-called the **parent**, using `previous_response_id`. The host restores the
-checkpoint where its graph finished and processes your new input. Use it to
-continue from an answer, try a different direction, or regenerate an answer.
-
-Response branching uses graph checkpoints through `ResponsesHostServer` and is
-disabled by default.
-**It requires a stored parent and its exact graph checkpoint.**
-The server uses a **response storage provider** for response records, separate
-from the graph checkpointer. Branching accepts the host's default provider:
-`FileResponseStore` locally or `FoundryStorageProvider` on Foundry. Passing
-server `store=provider` optionally overrides that default.
+a graph execution to replay or fork. Here, you select an earlier response,
+called the **parent**, using `previous_response_id`, and send new input to
+create a new branch. Use it to continue from an answer, try a different
+direction, or regenerate an answer.
 
 ## OpenAI compatibility target
 
@@ -219,6 +211,9 @@ reference errors rather than substituting another parent.
 
 ### Server configuration
 
+`ResponsesHostServer` enables branching with `enable_response_branching=True`;
+branching is disabled by default.
+
 Keep `options.steerable_conversations=False` and `app=None`. Steering hands off
 an in-flight turn; checkpoint-based branching selects a saved response boundary.
 The adapter must create its own host to configure branching. Unsupported
@@ -256,6 +251,11 @@ Checkpoint-based branching additionally needs graph checkpoints:
 | ------------------------------------------------------------------ | -------------------------- | -------------------------------------------------- |
 | Response, status, input/output, and internal checkpoint references | SDK response provider      | Host default; optional `store=provider`            |
 | Graph state, pending writes, and checkpoint history                | LangGraph checkpoint saver | Graph: `checkpointer=...`                          |
+
+The server uses a **response storage provider** for response records, separate
+from the graph checkpointer. Branching accepts the host's default provider:
+`FileResponseStore` locally or `FoundryStorageProvider` on Foundry. Passing
+server `store=provider` optionally overrides that default.
 
 Response retention does not replace the graph's checkpointer. The application
 owns the graph saver's initialization, lifecycle, and general retention policy.
