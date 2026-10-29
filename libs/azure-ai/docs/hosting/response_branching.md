@@ -1,8 +1,12 @@
 # Response Branching
 
-Response branching lets you send new input using the context of an earlier
-response, called the **parent**. Use it to continue from an answer, try a
-different direction, or regenerate an answer.
+Response branching brings
+[LangGraph time travel](https://docs.langchain.com/oss/python/langgraph/use-time-travel)
+to response boundaries. LangGraph lets applications select checkpoints within
+a graph execution to replay or fork. Here, you select an earlier stored response,
+called the **parent**, using `previous_response_id`. The host restores the
+checkpoint where its graph finished and processes your new input. Use it to
+continue from an answer, try a different direction, or regenerate an answer.
 
 This target design provides checkpoint-based branching through
 `ResponsesHostServer`, disabled by default; it does not establish availability
