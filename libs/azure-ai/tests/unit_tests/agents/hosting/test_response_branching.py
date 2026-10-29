@@ -9,6 +9,8 @@ import asyncio
 import hashlib
 import json
 import operator
+from collections.abc import AsyncGenerator, AsyncIterator
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,9 +30,15 @@ from azure.ai.agentserver.responses import (  # noqa: E402
     ResponseEventStream,
     ResponsesServerOptions,
 )
-from azure.ai.agentserver.responses.models import CreateResponse  # noqa: E402
+from azure.ai.agentserver.responses.models import (  # noqa: E402
+    CreateResponse,
+    ResponseObject,
+)
 from azure.ai.agentserver.responses.models.runtime import (
     ResponseModeFlags,  # noqa: E402
+)
+from azure.ai.agentserver.responses.streaming._checkpoint import (  # noqa: E402
+    ResponseCheckpointEvent,
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
 from langchain_core.runnables import RunnableConfig  # noqa: E402
@@ -727,3 +735,278 @@ async def test_ordinary_continuation_keeps_chain_checkpoint(
     assert config["configurable"]["thread_id"] == "chain-thread"
     chain.get.assert_awaited_once()
     lookup.assert_not_awaited()
+
+
+def _recovery_context(
+    request: CreateResponse,
+    provider: InMemoryResponseProvider,
+    response_id: str,
+    snapshot: ResponseObject | None = None,
+) -> ResponseContext:
+    context = ResponseContext(
+        response_id=response_id,
+        request=request,
+        previous_response_id=request.get("previous_response_id"),
+        conversation_id=cast(str | None, request.get("conversation")),
+        mode_flags=ResponseModeFlags(stream=False, store=True, background=True),
+        provider=provider,
+    )
+    context.is_recovery = snapshot is not None
+    context.persisted_response = snapshot
+    return context
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_branch_recovery_without_progress_restores_exact_parent(
+    admitted: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    graph = _graph(calls)
+    provider = InMemoryResponseProvider()
+    chain = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    server = ResponsesHostServer(
+        graph,
+        store=provider,
+        conversation_chain_store=chain,
+        enable_response_branching=True,
+    )
+    parent_request = cast(
+        CreateResponse, {"input": "A", "conversation": "existing-conversation"}
+    )
+    parent = [
+        event
+        async for event in server._handle_create_async_gen(
+            parent_request,
+            _recovery_context(parent_request, provider, "parent"),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    await provider.create_response(parent, None, None)
+    request = cast(CreateResponse, {"input": "B", "previous_response_id": "parent"})
+    snapshot = None
+    if admitted:
+        events = server._handle_create_async_gen(
+            request, _recovery_context(request, provider, "child"), asyncio.Event()
+        )
+        async for event in events:
+            if isinstance(event, ResponseCheckpointEvent):
+                snapshot = deepcopy(event.response)
+                break
+        await cast(AsyncGenerator[Any, None], events).aclose()
+        assert snapshot is not None
+        assert (
+            TaskStorageManager.from_stream(
+                ResponseEventStream(response_id="child", response=snapshot)
+            ).checkpoint_ref
+            is None
+        )
+    sibling_request = cast(
+        CreateResponse, {"input": "newer", "previous_response_id": "parent"}
+    )
+    sibling = [
+        event
+        async for event in server._handle_create_async_gen(
+            sibling_request,
+            _recovery_context(sibling_request, provider, "sibling"),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    assert _text(sibling) == "A|newer"
+    chain.get.reset_mock()
+    chain.set.reset_mock()
+    lookup = AsyncMock(wraps=provider.get_response)
+    monkeypatch.setattr(provider, "get_response", lookup)
+    context = _recovery_context(request, provider, "child", snapshot)
+    context.is_recovery = True
+    recovered = [
+        event
+        async for event in server._handle_create_async_gen(
+            request, context, asyncio.Event()
+        )
+    ][-1]["response"]
+    assert recovered["status"] == "completed"
+    assert recovered["id"] == "child"
+    assert _text(recovered) == "A|B"
+    assert calls[-1] == ["A", "B"]
+    assert lookup.await_count == 1
+    chain.get.assert_not_awaited()
+    chain.set.assert_not_awaited()
+
+
+@pytest.mark.parametrize("paused", [False, True])
+@pytest.mark.parametrize("override_config", [False, True])
+async def test_branch_recovery_uses_own_progress_without_parent_lookup(
+    paused: bool, override_config: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def answer(state: MessagesState) -> dict[str, Any]:
+        texts = [
+            str(message.content)
+            for message in state["messages"]
+            if isinstance(message, HumanMessage)
+        ]
+        if paused and texts[-1] == "B":
+            interrupt("Continue?")
+        return {"messages": [AIMessage(content="|".join(texts))]}
+
+    class ConfiguredHost(ResponsesHostServer):
+        async def build_runnable_config(
+            self, request: CreateResponse, context: ResponseContext
+        ) -> RunnableConfig:
+            if override_config:
+                return {
+                    "configurable": {"thread_id": "wrong", "checkpoint_id": "wrong"}
+                }
+            return await super().build_runnable_config(request, context)
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.add_edge(START, "answer")
+    builder.add_edge("answer", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    provider = InMemoryResponseProvider()
+    chain = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    original = ResponsesHostServer(
+        graph, store=provider, conversation_chain_store=chain
+    )
+    parent_request = cast(CreateResponse, {"input": "A"})
+    parent = [
+        event
+        async for event in original._handle_create_async_gen(
+            parent_request,
+            _recovery_context(parent_request, provider, "parent"),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    await provider.create_response(parent, None, None)
+    server = ConfiguredHost(
+        graph,
+        store=provider,
+        conversation_chain_store=chain,
+        enable_response_branching=True,
+    )
+    request = cast(CreateResponse, {"input": "B", "previous_response_id": "parent"})
+    snapshot = deepcopy(
+        [
+            event
+            async for event in server._handle_create_async_gen(
+                request, _recovery_context(request, provider, "child"), asyncio.Event()
+            )
+        ][-1]["response"]
+    )
+    own_config = _config(snapshot)
+    state = await graph.aget_state(own_config)
+    assert bool(state.next) == paused
+    sibling_request = cast(
+        CreateResponse, {"input": "newer", "previous_response_id": "parent"}
+    )
+    _ = [
+        event
+        async for event in server._handle_create_async_gen(
+            sibling_request,
+            _recovery_context(sibling_request, provider, "sibling"),
+            asyncio.Event(),
+        )
+    ]
+    captured: list[tuple[Any, RunnableConfig]] = []
+    original_stream = server.graph.astream
+
+    async def capture(
+        graph_input: Any, *, config: RunnableConfig, **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        captured.append((graph_input, config))
+        async for chunk in original_stream(graph_input, config=config, **kwargs):
+            yield chunk
+
+    monkeypatch.setattr(server.graph, "astream", capture)
+    lookup = AsyncMock(side_effect=RuntimeError("Parent is unavailable"))
+    monkeypatch.setattr(provider, "get_response", lookup)
+    chain.get.reset_mock()
+    chain.set.reset_mock()
+    recovered = [
+        event
+        async for event in server._handle_create_async_gen(
+            request,
+            _recovery_context(request, provider, "child", snapshot),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    assert recovered["status"] == "completed"
+    assert recovered["id"] == "child"
+    assert len(captured) == 1
+    assert captured[0][0] is None
+    assert HostingRunnableConfig(captured[0][1]).checkpoint_ref == (
+        HostingRunnableConfig(own_config).checkpoint_ref
+    )
+    state = await graph.aget_state(own_config)
+    assert [
+        message.content
+        for message in state.values["messages"]
+        if isinstance(message, HumanMessage)
+    ] == ["A", "B"]
+    lookup.assert_not_awaited()
+    chain.get.assert_not_awaited()
+    chain.set.assert_not_awaited()
+
+
+@pytest.mark.parametrize("damage", ["partial", "malformed", "missing"])
+async def test_branch_recovery_with_invalid_progress_does_not_restart(
+    damage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    saver = InMemorySaver()
+    graph = _graph(calls, saver=saver)
+    provider = InMemoryResponseProvider()
+    chain = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    server = ResponsesHostServer(
+        graph,
+        store=provider,
+        conversation_chain_store=chain,
+        enable_response_branching=True,
+    )
+    parent_request = cast(CreateResponse, {"input": "A"})
+    parent = [
+        event
+        async for event in server._handle_create_async_gen(
+            parent_request,
+            _recovery_context(parent_request, provider, "parent"),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    await provider.create_response(parent, None, None)
+    request = cast(CreateResponse, {"input": "B", "previous_response_id": "parent"})
+    snapshot = deepcopy(
+        [
+            event
+            async for event in server._handle_create_async_gen(
+                request, _recovery_context(request, provider, "child"), asyncio.Event()
+            )
+        ][-1]["response"]
+    )
+    config = _config(snapshot)["configurable"]
+    seed = ResponseEventStream(response_id="child", response=snapshot)
+    if damage == "partial":
+        seed.internal_metadata.pop("langgraph_checkpoint_id")
+    elif damage == "malformed":
+        seed.internal_metadata["langgraph_checkpoint_id"] = 42
+    else:
+        saver.storage[config["thread_id"]][""].pop(config["checkpoint_id"])
+    lookup = AsyncMock(wraps=provider.get_response)
+    monkeypatch.setattr(provider, "get_response", lookup)
+    chain.get.reset_mock()
+    chain.set.reset_mock()
+    before = deepcopy(calls)
+    recovered = [
+        event
+        async for event in server._handle_create_async_gen(
+            request,
+            _recovery_context(
+                request, provider, "child", cast(ResponseObject, seed.response)
+            ),
+            asyncio.Event(),
+        )
+    ][-1]["response"]
+    assert recovered["status"] == "failed"
+    assert calls == before
+    lookup.assert_not_awaited()
+    chain.get.assert_not_awaited()
+    chain.set.assert_not_awaited()

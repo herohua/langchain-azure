@@ -41,6 +41,28 @@ class TaskStorageManager:
             return None
         return CheckpointRef(thread_id, checkpoint_id)
 
+    @property
+    def recovery_checkpoint_ref(self) -> CheckpointRef | None:
+        """Return saved progress, or None before a checkpoint was recorded.
+
+        Raises:
+            RuntimeError: If the recorded checkpoint reference is malformed.
+        """
+        reference = self.checkpoint_ref
+        if (
+            reference is None
+            and self._metadata is not None
+            and any(
+                key in self._metadata
+                for key in (
+                    METADATA_LANGGRAPH_THREAD_ID,
+                    METADATA_LANGGRAPH_CHECKPOINT_ID,
+                )
+            )
+        ):
+            raise RuntimeError("The response checkpoint reference is malformed.")
+        return reference
+
     def store_checkpoint_ref(self, checkpoint_ref: CheckpointRef) -> None:
         """Store a LangGraph reference on the active response."""
         if self._metadata is None:

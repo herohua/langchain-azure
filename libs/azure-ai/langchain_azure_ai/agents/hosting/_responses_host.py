@@ -361,6 +361,7 @@ class ResponsesHostServer:
             and steering disabled. Conversation requests keep their existing
             continuation path. Parents with pending tasks or interrupts fail
             before graph execution through the existing response error stream.
+            Recovery requires the same setting as the original execution.
         prefix: URL prefix for response routes (e.g. ``"/v1"``).
         applicationinsights_connection_string: Forwarded to
             :class:`AgentServerHost`.
@@ -720,7 +721,16 @@ class ResponsesHostServer:
             A ``RunnableConfig`` dict.
         """
         if self._uses_response_branching(request, context):
-            reference = await select_branch_checkpoint(request, context)
+            reference = None
+            if context.is_recovery and context.persisted_response is not None:
+                reference = TaskStorageManager.from_stream(
+                    ResponseEventStream(
+                        response_id=context.response_id,
+                        response=context.persisted_response,
+                    )
+                ).recovery_checkpoint_ref
+            if reference is None:
+                reference = await select_branch_checkpoint(request, context)
             config = HostingRunnableConfig.create_from_checkpoint(
                 reference, context
             ).runnable_config
@@ -756,9 +766,9 @@ class ResponsesHostServer:
     def _uses_response_branching(
         self, request: CreateResponse, context: ResponseContext
     ) -> bool:
+        # shortcut: recovery assumes a stable flag; persist mode to allow changes.
         return (
             self._enable_response_branching
-            and not context.is_recovery
             and request.get("previous_response_id") is not None
             and not (get_conversation_id(request) or context.conversation_id)
         )
@@ -969,6 +979,7 @@ class ResponsesHostServer:
 
         usage = UsageAccumulator()
         try:
+            branch_execution = self._uses_response_branching(request, context)
             config = await self.build_runnable_config(request, context)
             root_response_id = HostingRunnableConfig(config).root_response_id
             if root_response_id is not None:
@@ -988,15 +999,21 @@ class ResponsesHostServer:
             resume_command: Optional["Command"] = None
             consumed_call_ids: frozenset[str] = frozenset()
             graph_input: dict[str, Any] | Command | None
-            checkpoint_ref = task_storage.checkpoint_ref if recovering else None
+            checkpoint_ref = None
+            if recovering:
+                checkpoint_ref = (
+                    task_storage.recovery_checkpoint_ref
+                    if branch_execution
+                    else task_storage.checkpoint_ref
+                )
             branch_state = None
             graph = self._graph
-            # shortcut: keep existing recovery until response-owned recovery lands.
-            branch_execution = self._uses_response_branching(request, context)
             if branch_execution:
-                reference = (config.get("configurable") or {}).get(
-                    _BRANCH_CHECKPOINT_REF_CONFIG_KEY
-                )
+                reference = checkpoint_ref
+                if reference is None:
+                    reference = (config.get("configurable") or {}).get(
+                        _BRANCH_CHECKPOINT_REF_CONFIG_KEY
+                    )
                 if not isinstance(reference, CheckpointRef):
                     reference = await select_branch_checkpoint(request, context)
                 graph = copy(graph)
@@ -1017,7 +1034,7 @@ class ResponsesHostServer:
             checkpoint_reads = _checkpoint_reads.get()
             if checkpoint_reads is not None:
                 checkpoint_reads.pin(getattr(self._graph, "checkpointer", None), config)
-            if branch_execution:
+            if branch_execution and checkpoint_ref is None:
                 branch_state = await validate_branch_checkpoint(graph, config)
 
             if checkpoint_ref is not None:
