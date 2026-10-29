@@ -54,8 +54,6 @@ exact checkpoint, even if B has already finished when C starts. C does not
 inherit B's changes, and A's saved state stays unchanged.
 
 The branches share a LangGraph thread, with separate checkpoint histories.
-For response-ID branching, the host restores graph state directly; it does not
-rebuild it from response message history.
 
 Ordinary continuation owns request admission, parent selection, and persistence
 of each response's checkpoint reference. Branching reuses that contract: once a
