@@ -10,16 +10,15 @@ called the **parent**, using `previous_response_id`, and send new input to
 create a new branch. Use it to continue from an answer, try a different
 direction, or regenerate an answer.
 
-## OpenAI compatibility target
-
-Public HTTP request and response behavior under `/responses` must follow the
-[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
-and [conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state).
-The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
-provides the client usage baseline; the API reference defines the field semantics.
-
-This design does not expose LangGraph Agent Server graph management APIs or
-OpenAI's Conversations API.
+> [!NOTE]
+> Public HTTP request and response behavior under `/responses` must follow the
+> [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+> and [conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state).
+> The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
+> provides the client usage baseline; the API reference defines the field semantics.
+>
+> This design does not expose LangGraph Agent Server graph management APIs or
+> OpenAI's Conversations API.
 
 ## The basic idea
 
