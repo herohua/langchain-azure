@@ -24,10 +24,15 @@ direction, or regenerate an answer.
 
 ### Checkpoint-based branching
 
-With a graph checkpointer, the host selects `langgraph_checkpoint` mode: prior
-state comes from a checkpoint, so only the current request input is passed to
-the graph. The checkpoint-specific eligibility, storage, and recovery rules
-below describe this mode, not history-based continuation.
+The host can continue a conversation in two ways:
+
+- **Response history:** without a checkpointer, combine prior response history
+  with the current input.
+- **Checkpoint:** with a checkpointer, restore prior graph state and pass only
+  the current input to the graph.
+
+Response branching requires a graph checkpointer and the selected parent's
+exact checkpoint. The following sections cover only checkpoint-based branching.
 
 A **checkpoint** is saved LangGraph execution state, including messages and
 other graph state. Each reusable response points to its own final checkpoint.
