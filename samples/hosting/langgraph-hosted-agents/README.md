@@ -46,6 +46,8 @@ use its README for requests, then follow [deployment](#deploying-the-agent-to-fo
 
 ## Samples
 
+For an offline checkpoint/storage performance diagnostic and optimization handoff specs, see [checkpoint-perf](../checkpoint-perf/README.md). This diagnostic requires no model, credentials, or deployment.
+
 ### Responses protocol
 
 | # | Sample | Description |
