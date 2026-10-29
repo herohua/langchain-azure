@@ -92,7 +92,7 @@ cross-linkage question tracked under [TODO](#todo).
 ## Quick start
 
 **Target-design example:** This setup illustrates the intended contract, not
-verified support in a published version or the linked [implementation PR](https://github.com/langchain-ai/langchain-azure/pull/1206).
+verified support in a published version.
 
 ### 1. Enable branching on the server
 
@@ -472,16 +472,14 @@ appending persisted text again.
 
 - [Responses handler](../../langchain_azure_ai/agents/hosting/_responses_host.py):
   `build_runnable_config`, `handle_create`, and `_new_stream`.
-- Branch preparation (`agents/hosting/_responses/branching.py`, proposed in
-  [PR #1206](https://github.com/langchain-ai/langchain-azure/pull/1206)):
+- Proposed branch preparation (`agents/hosting/_responses/branching.py`):
   admission, parent selection, and eligibility after configuration hooks.
 - [Task storage and checkpoint adaptation](../../langchain_azure_ai/agents/hosting/_responses/task_storage_manager.py):
   shared progress references, exact reads, ownership, persistence barriers, and
   native recovery references.
 - [Graph-stream conversion](../../langchain_azure_ai/agents/hosting/_converters/_stream.py):
   graph persistence before SDK progress publication.
-- Branching tests (`tests/unit_tests/agents/hosting/test_response_branching.py`,
-  proposed in [PR #1206](https://github.com/langchain-ai/langchain-azure/pull/1206)):
+- Proposed branching tests (`tests/unit_tests/agents/hosting/test_response_branching.py`):
   parent preservation, concurrent sibling, failure, and recovery coverage.
   The target contract below requires additional compatibility coverage.
 
