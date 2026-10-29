@@ -1,65 +1,18 @@
 # Response Branching
 
-Response branching lets you send new input using the context of an earlier
-response, called the **parent**. Use it to continue from an answer, try a
-different direction, or regenerate an answer.
+Response branching lets a client select an earlier response and send new input
+from its saved graph state. The selected response is the **parent**; the new
+response is its **child**. Use this to try a different follow-up or regenerate
+an answer.
 
-This target design provides checkpoint-based branching through
-`ResponsesHostServer`, disabled by default; it does not establish availability
-in a published version.
-**It requires a stored parent and its exact graph checkpoint.**
-The server uses a **response storage provider** for response records, separate
-from the graph checkpointer. Branching accepts the host's default provider:
-`FileResponseStore` locally or `FoundryStorageProvider` on Foundry. Passing
-server `store=provider` optionally overrides that default.
+> **Design status:** This document defines the target behavior, including the
+> examples below. It does not claim availability in a published release or full
+> implementation in [PR #1206](https://github.com/langchain-ai/langchain-azure/pull/1206).
+> See [Implementation gaps and verification](#implementation-gaps-and-verification).
 
-> **Specification status:** This document defines the target contract, not a
-> claim of full implementation. Current behavior, implementation gaps, and
-> deferred scope are listed under
-> [Implementation gaps and verification](#implementation-gaps-and-verification).
+## Overview
 
-## OpenAI compatibility target
-
-Public HTTP request and response behavior under `/responses` must follow the
-[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
-and [conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state).
-The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
-provides the client usage baseline; the API reference defines the field semantics.
-This does not add OpenAI-hosted models or built-in tools to the configured graph.
-
-This specification does not require the default host to expose `/conversations`
-or its item-management routes. The `/responses` request field `conversation`
-references an existing conversation resolved by the configured provider or
-platform. Creating and managing that resource is outside this API path's scope.
-
-- `previous_response_id` selects a specific response, not a thread's latest state.
-- `conversation` identifies a separate persistent conversation resource. It is
-  not a response ID. Lookup and parent selection follow ordinary continuation.
-- `previous_response_id` and `conversation` are mutually exclusive.
-- Request `store` controls response retention and defaults to `True`. Enabling
-  branching must not silently override `store=False`. See
-  [Request store behavior](#request-store-behavior) for response retention.
-- Tool outputs and approval decisions are valid continuation inputs. A graph
-  pause alone must not cause an otherwise valid protocol request to be rejected.
-- With `previous_response_id`, a previous response's top-level `instructions`
-  are not carried over. Clients resend instructions they want on each turn.
-
-Checkpoint selection is an internal execution strategy. It must preserve these
-public semantics rather than introduce a separate client protocol.
-
-## The basic idea
-
-### Checkpoint-based branching
-
-With a graph checkpointer, the host selects `langgraph_checkpoint` mode: prior
-state comes from a checkpoint, so only the current request input is passed to
-the graph. The checkpoint-specific eligibility, storage, and recovery rules
-below describe this mode, not history-based continuation.
-
-A **checkpoint** is saved LangGraph execution state, including messages and
-other graph state. Each reusable response points to its own final checkpoint.
-
-Suppose A suggests a destination. You can ask for two different plans from A:
+Suppose response A suggests a destination. Two requests can use A as their parent:
 
 ```text
 A: Suggest a destination.
@@ -67,34 +20,127 @@ A: Suggest a destination.
 `-- C: Plan a relaxed itinerary.
 ```
 
-Both B and C use `previous_response_id=A.id`. Each starts from A's exact
-checkpoint, even if B has already finished when C starts. C does not inherit
-B's changes, and A's saved state stays unchanged.
+Both requests set `previous_response_id=A.id`. Each starts from A's exact
+**checkpoint**: saved LangGraph execution state, including messages and other
+graph state. C starts from A even if B has already finished. A's checkpoint
+stays unchanged.
 
-The branches share a LangGraph thread, with separate checkpoint histories.
-For response-ID branching, the host restores graph state directly; it does not
-rebuild it from response message history.
+The branches share a LangGraph thread, with separate checkpoint histories. The
+host restores the selected checkpoint and passes only the current request input
+to the graph. This is the `langgraph_checkpoint` execution mode; history-based
+continuation instead uses stored response history.
 
-Ordinary continuation owns request admission, parent selection, and persistence
-of each response's checkpoint reference. Branching reuses that contract: once a
-stored, eligible parent is selected, it restores that parent's exact checkpoint
-and creates an independent child.
+This design covers branching from parents whose graphs have finished. Branching
+from paused parents is deferred, including isolation of tool replies, approval
+decisions, and resume state between children. Ordinary tool and approval
+continuation keeps its existing behavior.
 
-A stored response created within a conversation can be selected using
-`previous_response_id` when the common continuation rules allow it. The branch
-restores that response's persisted exact checkpoint, not a mutable conversation
-head. Whether that branch advances the original conversation's head is a separate
-cross-linkage question tracked under [TODO](#todo).
+## Request behavior
+
+Branching reuses **ordinary continuation**: the host's existing rules for
+accepting requests, resolving conversations, selecting parents, and persisting
+response checkpoint references. It adds restoration of the selected parent's
+exact checkpoint.
+
+### Request routing
+
+A **root response** has no parent. With `enable_response_branching=True`:
+
+| Request linkage | Behavior |
+| --- | --- |
+| Neither `previous_response_id` nor `conversation` | Start a root response in a new thread. |
+| `previous_response_id` only | Start a child from the selected parent's exact checkpoint. |
+| `conversation` only | Use ordinary conversation continuation. |
+| Both fields | Reject with HTTP 400 before graph execution. |
+
+Omitted or `null` linkage fields do not select a parent or conversation. Resolve
+references within the request's authorized storage scope. An ID from another
+scope does not grant access. Reference errors follow the common continuation
+rules and must prevent graph execution.
+
+A response stored in a conversation can be selected using `previous_response_id`
+when ordinary continuation allows it. The branch uses that response's checkpoint.
+Conversation-head selection and updates belong to ordinary continuation; the
+remaining cross-linkage question is listed under [TODO](#todo).
+
+### Parent eligibility
+
+A parent is eligible only when:
+
+1. It is stored with `status="completed"` and accessible to the caller.
+2. Its internal metadata identifies its exact final graph checkpoint.
+3. That checkpoint and the history needed to restore it are available.
+4. Its graph has finished, with no pending tasks or interrupts, and its output
+   has no outstanding function calls or MCP approval requests.
+
+**Response completion and graph completion are different.** A completed response
+can contain tool calls or approval requests while its graph is paused. Such a
+response is not eligible for branching, even if the request supplies matching
+replies.
+
+In-progress, failed, or cancelled parents receive a 4xx error under the common
+error contract before graph execution. The host must not wait for completion,
+substitute another response, or select intermediate progress.
+
+Parents created before branching was enabled or through ordinary continuation
+are eligible when they satisfy these rules. No branching-specific marker is
+required. Later responses do not change the checkpoint selected by an earlier
+response ID.
+
+If a required checkpoint reference or checkpoint is missing, mismatched, or
+unreadable, fail before graph execution. Never substitute a latest checkpoint,
+message-history reconstruction, or a new root.
+
+### OpenAI compatibility
+
+Public HTTP requests and responses under `/responses` must follow the
+[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+and [conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state).
+The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
+provides a client usage baseline. The API reference defines field semantics.
+
+- `previous_response_id` selects a response. `conversation` identifies a separate
+  persistent conversation resource resolved by the configured provider or platform.
+- Tool outputs and approval decisions remain valid continuation inputs. Validate
+  them through the appropriate continuation path; a graph pause alone is not a
+  protocol error. Paused-parent branching remains outside this design's scope.
+- A parent's top-level `instructions` are not carried over, including through its
+  checkpoint. Clients must resend instructions they want on each turn. System or
+  developer message items in conversation history remain distinct from these
+  request-scoped instructions.
+- Request `store` retains its existing meaning. See
+  [Request store behavior](#request-store-behavior).
+
+The branching flag selects an internal checkpoint execution strategy. It must
+preserve these public semantics. This design does not add OpenAI-hosted models,
+built-in tools, or a requirement to expose `/conversations` and its item-management
+routes. Creating and managing conversation resources is outside this API path.
+
+## Configuration
+
+Enable branching with `enable_response_branching=True` on `ResponsesHostServer`.
+It is disabled by default.
+
+- Compile the graph with a checkpointer that preserves history and supports
+  asynchronous reads and writes. Keep referenced checkpoints and the history
+  needed to restore them.
+- Keep `options.steerable_conversations=False` and `app=None`. Steering hands off
+  an in-flight turn; branching selects a saved response boundary. The adapter
+  must create its own host to configure branching.
+
+A missing checkpointer, missing required async methods, or unsupported
+configuration combination raises `ValueError` during host initialization.
+
+The host selects a response storage provider automatically: `FileResponseStore`
+locally or `FoundryStorageProvider` on Foundry. Server `store=provider` optionally
+overrides that provider. This argument takes a provider, not a boolean.
 
 ## Quick start
-
-**Target-design example:** This setup illustrates the intended contract, not
-verified support in a published version or the linked [implementation PR](https://github.com/langchain-ai/langchain-azure/pull/1206).
 
 ### 1. Enable branching on the server
 
 Starting from the [basic hosting setup](../../README.md#hosting-langgraph-agents-on-microsoft-foundry)
-with a configured `model`, enable branching on a graph with a checkpointer:
+with a configured `model`:
 
 ```python
 from langchain.agents import create_agent
@@ -111,9 +157,8 @@ if __name__ == "__main__":
     ).run(port=8088)
 ```
 
-  Server `store=provider` is an optional response-provider override, not a boolean.
-  `InMemorySaver` is for local demos; use a durable, history-preserving saver for
-  reuse after restart.
+`InMemorySaver` is for local demos. Use a durable, history-preserving saver to
+retain graph state across process restarts.
 
 ### 2. Create a parent and two branches
 
@@ -136,405 +181,295 @@ print(b.output_text)
 print(c.output_text)
 ```
 
-A must be stored (`store=True`, the default) and its graph must finish.
-B and C each start from A's exact checkpoint, independently of one another.
+A must satisfy the [parent eligibility rules](#parent-eligibility). B and C each
+start from A's checkpoint.
 
 ### 3. Continue, regenerate, or rewind
 
-- **Continue B:** send new input with `previous_response_id=b.id`.
-- **Regenerate B:** resend B's input with its original parent,
-  `previous_response_id=a.id`, to create a new response.
-- **Rewind:** select an earlier parent to start a new response; this does not
-  delete history, replay stored SSE events, or undo external effects.
+| Operation | Next request |
+| --- | --- |
+| Continue B | Send new input with `previous_response_id=b.id`. |
+| Regenerate B | Resend B's input and per-request settings with its original parent, `previous_response_id=a.id`. |
+| Rewind | Select an earlier response as the next request's parent. |
 
-## Requirements and request rules
+Each operation creates a new response. Selecting an earlier parent preserves
+history; it does not replay stored SSE events or undo external effects.
 
-With `enable_response_branching=True`, three requirements are mandatory:
+## Storage and retention
 
-- The graph must have a checkpointer. Reject a graph without one with
-  `ValueError` during host initialization.
-- A response-ID branch must restore the selected parent's exact final checkpoint,
-  not the thread's or conversation's latest checkpoint.
-- If the required checkpoint reference or checkpoint is missing, mismatched, or
-  unreadable, fail before graph execution. Do not fall back to message-history
-  reconstruction, a latest checkpoint, or a new root response.
+### Request store behavior
 
-The parent eligibility rules below cover only branching from finished parent
-graphs. Ordinary tool and approval continuation keeps its existing behavior.
-Branching from a paused parent is future work, including isolation of tool replies,
-approval decisions, and resume state between children of that parent. Supplying
-matching replies does not make a paused parent eligible for this branching path.
-
-A response-ID parent is reusable only when:
-
-1. It was stored with `status="completed"` and is available to the requesting caller.
-2. Its stored internal metadata identifies its exact final graph checkpoint.
-3. That checkpoint and the history needed to restore it are still available.
-4. Its graph has finished, with no pending tasks or interrupts, and its output
-   has no outstanding function calls or MCP approval requests.
-
-A branch selecting an in-progress, failed, or cancelled parent receives a 4xx
-error under the common error contract before graph execution. Do not wait for
-completion or fall back to another response or intermediate progress. Broader
-continuation and recovery pointer timing is outside this feature.
-
-Parents created before branching was enabled or through ordinary continuation,
-including responses saved in a conversation, are eligible when the common
-continuation rules admit them and they satisfy these checks. No branching-specific
-marker is required. Later responses do not change the checkpoint selected by an
-earlier response ID.
-
-**Response completion and graph completion are different.** A response can
-contain tool calls or approval requests while its graph is paused. Such a parent
-is outside the current branching scope, even if its response status is
-`completed`. Current branching restores a finished checkpoint.
-
-### Instructions, checkpoints, and routing
-
-Do not inherit a previous response's top-level `instructions` through a graph
-checkpoint. Distinguish request-scoped instructions from actual system or
-developer message items supplied in conversation history.
-
-The graph's saver must preserve checkpoint history and implement asynchronous
-reads and writes. Keep referenced checkpoints and any history needed to restore
-them, not just the latest checkpoint.
-
-With `enable_response_branching=True`, request routing reuses ordinary
-continuation's admission and linkage rules:
-
-| Request linkage                   | Behavior                                                                                      |
-| --------------------------------- | --------------------------------------------------------------------------------------------- |
-| Neither parent nor `conversation` | Start a new root response in a new thread.                                                    |
-| `previous_response_id` only       | Start from the parent's exact checkpoint.                                                     |
-| `conversation` only               | Use ordinary continuation; conversation-head policy is outside this feature.                  |
-| Both parent and `conversation`    | Reject with HTTP 400.                                                                         |
-
-Omitted or `null` linkage fields do not select a parent or conversation.
-Resolve references within the request's authorized storage scope; a resource ID
-from another scope is not sufficient. Use the common continuation rules for
-reference errors rather than substituting another parent.
-
-Keep `options.steerable_conversations=False` and `app=None`. Steering hands off
-an in-flight turn; checkpoint-based branching selects a saved response boundary.
-The adapter must create its own host to configure branching. Unsupported
-combinations, or a saver without the required async methods, raise `ValueError`
-during initialization.
-
-The branching flag controls the checkpoint execution strategy for supported
-requests. It must not change the public meanings of `conversation`, `store`,
-or `instructions`.
-The constructor's existing automatic provider selection remains available with
-branching enabled or disabled; `store=provider` is an optional override.
-
-## Request `store` behavior
-
-Request `store` is a boolean and defaults to `True`. It controls retention of the
-current response, independently of the server's provider configuration. Enabling
-branching must honor this choice rather than force response retention.
+Request `store` is a boolean and defaults to `True`. It controls retention of
+the current response, independently of server `store=provider`. Enabling
+branching must honor `store=False`.
 
 A response created with `store=False` is not retained and cannot later be selected
-as a response-ID parent. A branch requires a stored, accessible parent, regardless
-of whether the child itself uses `store=True` or `store=False`. The child's
-retention choice must not delete or modify its stored parent.
+as a parent. A child can use either retention setting without deleting or
+modifying its stored parent. The graph saver writes checkpoints independently
+of response retention.
 
-Conversation-state isolation,
-temporary checkpoint cleanup, and full-input replay responsibilities also belong
-to a separate execution-lifecycle design. This branching feature does not define
-those behaviors or add them as implementation or verification requirements.
+Conversation-state isolation, temporary checkpoint cleanup, and full-input replay
+belong to a separate execution-lifecycle design. They are not implementation or
+verification requirements for this branching feature.
 
-## What must be stored?
+### Stored data and lifetime
 
-History-based continuation uses SDK-managed response and history storage.
-Checkpoint-based branching additionally needs graph checkpoints:
+| Data | Storage | Configuration |
+| --- | --- | --- |
+| Response, status, input/output, and checkpoint references | SDK response provider | Host default; optional server `store=provider`. |
+| Graph state, pending writes, and checkpoint history | LangGraph checkpoint saver | Graph `checkpointer=...`. |
 
-| Data                                                               | Where it lives             | How to configure it                                |
-| ------------------------------------------------------------------ | -------------------------- | -------------------------------------------------- |
-| Response, status, input/output, and internal checkpoint references | SDK response provider      | Host default; optional `store=provider`            |
-| Graph state, pending writes, and checkpoint history                | LangGraph checkpoint saver | Graph: `checkpointer=...`                          |
+The application owns the graph saver's initialization, lifecycle, and retention
+policy. A response provider does not replace the saver or force every response
+to be retained.
 
-The server uses its default response provider unless `store=provider` overrides
-it. The client's `store` is a boolean that defaults to `True` and controls
-retention of that response. Having a provider does not force every response to
-be retained.
+Enabling branching keeps automatic provider selection available. If overriding
+the provider, preserve its backend configuration and existing data. Selecting a
+different provider does not migrate response records or graph checkpoints.
 
-Response retention does not replace the graph's checkpointer. The application
-owns the graph saver's initialization, lifecycle, and general retention policy.
+Retaining a response does not retain or renew its graph checkpoints. Align both
+lifetimes and retain history needed by recoverable tasks. The host does not
+coordinate retention or cascade response deletion to checkpoints. Cleanup belongs
+to the backends. These policies do not promise OpenAI's hosted retention period.
 
-**Migration:** Existing automatic provider selection remains valid when enabling
-branching; no explicit provider argument is required. If overriding the provider,
-preserve its backend configuration and existing data. Selecting a different
-provider does not migrate response records or graph checkpoints.
+## Logical design
 
-**Retaining a response does not retain or renew its graph checkpoints.**
-Durable backends can still expire data. Align both lifetimes, retain history
-needed by recoverable tasks, and clean up unneeded data through the backends.
-For retained responses, the host does not coordinate retention or cascade response
-deletion to checkpoints.
-Backend retention policies are separate from OpenAI's hosted data-retention
-guarantees; this spec does not promise an identical retention period.
+### Checkpoint references
+
+Roots and children use the root checkpoint namespace, `checkpoint_ns=""`.
+
+An exact checkpoint reference identifies a thread, namespace, and checkpoint ID.
+Its role depends on where it is used:
+
+| Reference | Meaning |
+| --- | --- |
+| Origin | The parent's checkpoint: the starting point for a child. |
+| Progress | The current response's latest confirmed graph checkpoint, referenced by SDK recovery metadata. |
+| Final checkpoint | The last progress reference stored with a completed response. Reuse still requires parent eligibility checks. |
+
+These are references to graph state, not copies of it. **Ownership** ties a
+progress checkpoint to the response that wrote it and to that response's
+requested parent, if any. Several responses can share a thread, so a thread ID
+alone cannot establish ownership. A child's origin is not progress made by that
+child.
+
+### Persistence order
+
+Persistence has two stages:
+
+1. The graph saver writes the graph checkpoint. The host confirms that write
+   before publishing its reference.
+2. The host attaches the reference to SDK task metadata and requests an
+   **SDK recovery snapshot** containing the metadata and current response output.
+
+Requesting a snapshot does not confirm that the SDK has saved it. Recovery uses
+the last snapshot the SDK actually persisted. Graph writes and SDK response
+storage are not a transaction. A saved graph checkpoint alone is insufficient:
+the parent response must also be stored, completed, and eligible.
+
+### Fresh requests
+
+1. **Select the parent.** Apply ordinary continuation's validation and
+   parent-selection rules within the platform authorization context. Load the
+   selected parent's exact checkpoint reference. Roots have no parent lookup.
+2. **Validate the checkpoint.** For a selected parent, check its response and
+   output against the eligibility rules. After application hooks and graph
+   configuration have been applied, set the selected thread, root namespace,
+   and checkpoint ID again.
+   The returned checkpoint tuple and payload must match that identity, with no
+   next tasks or interrupts. Validation failure prevents execution.
+3. **Execute.** Shallow-copy the graph and attach a request-local saver wrapper,
+   leaving the application's graph and saver unchanged. Pass current input and
+   instructions, using the checkpoint for prior state. Run with
+   `durability="sync"` and `updates`, `messages`, and `checkpoints` stream modes.
+4. **Publish progress.** For each checkpoint event, wait for the underlying saver
+   write to succeed. Update the checkpoint reference in `TaskStorageManager`,
+   flush output events, and call `stream.checkpoint()` to request an SDK recovery
+   snapshot. A graph event alone does not confirm the write.
+5. **Finalize the response.** After shutdown/cancellation checks and pending
+   interrupt emission, emit `response.completed` for SDK finalization. Request
+   `store` controls terminal response retention. A retained response keeps the
+   final confirmed checkpoint reference; parent eligibility still applies.
+
+Configuration and input hooks, streaming, output conversion, progress storage,
+and SDK finalization remain shared with ordinary checkpointed execution.
+
+### Background recovery
+
+The Agent Server SDK controls recovery. Automatic crash recovery requires SDK
+opt-in and stored background work; enabling branching alone does not enable it.
+The SDK applies the same rules for accepting root and child requests.
+
+| Saved state | Recovery behavior |
+| --- | --- |
+| Root with no saved progress | Replay its original request using the existing root configuration. |
+| Child with no saved progress | Re-read and validate its stored parent, then replay the child's input from that exact checkpoint. Fail if required data is unavailable. |
+| Root or child with valid progress owned by that response | Resume with input `None`, preserving pending writes. No parent lookup is needed. |
+| Valid saved progress whose graph is already finished | Finalize the response without running graph nodes again. |
+| Malformed progress, unavailable or mismatched checkpoint, or wrong ownership | Fail without falling back to the parent or thread's latest checkpoint. |
+
+These are backend recovery rules, not additional OpenAI request-validation rules.
+Work beyond the last persisted SDK snapshot can repeat, including external
+effects. Response finalization and storage may also run again after the graph
+finishes. Keep the checkpoint history needed to restore that saved state.
 
 ## Failures and limitations
 
-Check the response status or terminal SSE event, not only the HTTP status:
-execution errors can arrive as `status="failed"` or `response.failed` after
-HTTP admission. Parameter and reference validation must prevent graph execution;
-do not turn those caller errors into successful-looking graph runs. Match the
-OpenAI HTTP error and streaming contracts for the corresponding condition.
-Backend execution failures use public error code `server_error`; internal codes
-are logged. Exact reference-error statuses and codes need the verification below.
+Check the response status or terminal SSE event as well as the HTTP status.
+Execution errors can arrive as `status="failed"` or `response.failed` after HTTP
+admission. Parameter and reference errors must prevent graph execution. Match
+the corresponding OpenAI HTTP error and streaming contracts. Backend execution
+failures use public code `server_error`; log internal codes separately. Exact
+reference-error statuses and codes still need the verification listed below.
 
-| Problem                                                                                                             | Result and action                                                                                                           |
-| ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Request includes `response_id`, an invalid parent ID, or both linkage fields                                        | HTTP 400 before execution. Omit `response_id`; use a nonempty string or `null` for the parent, and choose one linkage type. |
-| Referenced response is missing or inaccessible                                                                      | Return the corresponding OpenAI-compatible reference error before graph execution. Do not substitute a new root response.   |
-| `previous_response_id` refers to an unretained response                                                             | HTTP 400 with `previous_response_not_found`; do not restore an internal checkpoint in place of the missing response.        |
-| Stored parent lacks a checkpoint reference or its graph state cannot be restored                                    | Backend failure. Restore the required data or choose another parent.                                                        |
-| Input contains approval or tool-result replies                                                                      | Validate the linked calls and use the appropriate continuation path; these input types are not blanket errors.              |
-| Exact checkpoint is missing or mismatched                                                                           | Failed response. Restore the required data or choose another parent; there is no fallback to the latest checkpoint.         |
-| Graph checkpoint write fails                                                                                        | Failed response. Progress is not published for the missing checkpoint; investigate the saver backend.                       |
-| SDK terminal response storage fails                                                                                 | The graph checkpoint alone cannot serve as a parent. Check SDK storage errors and the stored response status.               |
+| Problem | Result and action |
+| --- | --- |
+| Request includes `response_id`, an invalid parent ID, or both linkage fields | HTTP 400 before execution. Omit `response_id`; use a nonempty string or `null` for the parent, and choose one linkage type. |
+| Referenced response is missing or inaccessible | Return the corresponding OpenAI-compatible reference error before execution. Do not substitute a new root. |
+| Parent response was not retained | HTTP 400 with `previous_response_not_found`. An internal checkpoint cannot replace the missing response. |
+| Stored parent lacks a checkpoint reference, or its graph state is missing, mismatched, or unreadable | Backend failure and failed response. Restore the required data or choose another parent. There is no fallback. |
+| Input contains approval or tool-result replies | Validate the linked calls and use the appropriate continuation path. These input types are not blanket errors. |
+| Graph checkpoint write fails | Failed response. Do not publish progress for the missing checkpoint; investigate the saver backend. |
+| SDK terminal response storage fails | The graph checkpoint alone cannot serve as a parent. Check SDK storage errors and stored response status. |
 
-- The supported deployment is one host process (one worker), not multiple host
-  processes or distributed workers. Concurrent branch requests within that host
-  are supported; this is not a one-active-request limit. A durable saver supports
-  process recreation, not guarantees for actual process-crash windows.
-- The host selects only the root checkpoint namespace (`checkpoint_ns=""`).
-  Private persistent subgraph histories are not rewound or isolated by the host.
-- External effects are not rolled back or guaranteed to happen exactly once.
-  Applications must make replayed work safe.
-
-## Checkpoint references
-
-A **root response** has no parent. A **child response** selects a parent using
-`previous_response_id`. Both use the root checkpoint namespace.
-
-| Name             | Meaning                                                                                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Origin           | The parent's exact graph checkpoint, which identifies a child's starting point.                                                                   |
-| Progress         | The current response's latest confirmed graph checkpoint, referenced by SDK recovery metadata.                                                     |
-| Final checkpoint | The last progress reference stored with a completed response. Parent eligibility is checked against the restored graph state and response output. |
-
-These names describe roles for checkpoint references, not copies of graph state.
-**Ownership** means that recovery progress belongs to the current response and
-its requested parent, if any. A shared thread can contain checkpoints from
-several responses, so the thread alone does not establish ownership. A child's
-parent checkpoint is its starting point, not progress made by that child.
-
-## Background recovery
-
-The Agent Server SDK controls when recovery runs. Enabling branching does not
-itself enable background recovery: automatic crash recovery requires SDK opt-in
-and stored background work. Root and child responses use the same SDK admission
-policy.
-
-The current checkpoint recovery machinery has the following behavior; these
-backend limits are not additional OpenAI request-validation rules:
-
-| Saved state                                                               | Recovery behavior                                                                                                                         |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Root with no saved progress                                               | Replay its original request using the existing root configuration.                                                                        |
-| Child with no saved progress                                              | Load and validate the parent's exact checkpoint, then replay the child's input. Fail if the parent or required checkpoint is unavailable. |
-| Root or child with valid, response-owned progress                         | Resume that checkpoint with input `None`, preserving pending writes. No parent response lookup is needed.                                 |
-| Root or child's saved graph is already finished                           | Finish response finalization without running graph nodes again.                                                                           |
-| Malformed progress, unavailable/mismatched checkpoint, or wrong ownership | Fail; do not fall back to the parent or the thread's latest checkpoint.                                                                   |
-
-Recovery uses the last response snapshot the SDK actually persisted. If graph
-execution advanced beyond that snapshot, work and external effects can repeat.
-Even with a finished graph checkpoint, response finalization and storage may run
-again. Keep the checkpoint history needed to restore the response's state.
+- **Deployment:** One host process, or one worker, supports concurrent branch
+  requests. Multi-process and distributed workers are outside this design. A
+  durable saver allows state to survive process recreation; actual process-crash
+  windows still need validation.
+- **Subgraphs:** The host selects the root checkpoint namespace only. It does
+  not rewind or isolate private persistent subgraph histories.
+- **External effects:** Branching does not roll back effects or guarantee
+  exactly-once execution. Applications must make replayed work safe.
 
 ## Implementation notes
 
-The following details are for maintainers; applications do not need to manage
-these fields or call these helpers.
+These details describe the proposed implementation for maintainers. Applications
+do not need to manage these fields or call these internal helpers.
 
-Branching adds exact starting-state selection to the existing hosting path,
-not a separate execution or recovery subsystem. Configuration and input hooks,
-graph streaming, output conversion, progress persistence, and SDK finalization
-remain shared with ordinary checkpointed execution.
+### Saver adapter
 
-The execution flow below is limited to finished-parent branching. Branching from
-parents awaiting function results or MCP approval decisions is future work;
-ordinary tool and approval continuation keeps its existing behavior.
+`ResponseCheckpointSaver` is a request-local asynchronous adapter in the existing
+task-storage module. It is shared by branching and ordinary checkpointed
+execution. The application's saver retains storage, serialization, channel-version
+allocation, and lifecycle ownership.
 
-### Fresh request
+Branch preparation uses `select_branch_checkpoint` to select an authorized
+parent. `branch_selection_scope` caches that lookup for configuration preparation
+within the request. `validate_branch_checkpoint` and the saver adapter validate
+exact reads. `wait_for_checkpoint` confirms graph writes before SDK progress
+publication. Completion retains the final confirmed progress reference.
 
-Persistence has two stages. First, the graph saver saves a **graph checkpoint**:
-the graph's execution state. After confirming that write, the host attaches the
-**checkpoint reference** (thread, namespace, and checkpoint ID) to SDK task
-metadata. It then requests an **SDK recovery snapshot** containing that metadata
-and the response's current output state. Requesting this snapshot is not an
-acknowledgement that the SDK has persisted it; recovery uses the last snapshot
-the SDK actually saved.
+Synchronous private-subgraph calls pass through without changing root progress.
+Native subgraph replay delegates history queries to the application saver. Root
+progress confirmation needs no cross-thread futures or locks.
 
-1. **Select.** Reuse ordinary continuation's request admission and parent
-  selection. For a supported finished parent, load its stored exact checkpoint
-  reference through `select_branch_checkpoint` within the platform's
-  authorization context. `branch_selection_scope` caches this selection only
-  for the request. A child without saved progress re-reads its stored parent.
-2. **Validate.** For a selected parent, verify that its stored response is
-   completed and has no outstanding function calls or MCP approval requests.
-   After configuration hooks and graph-bound configuration merging, re-pin the
-   parent's thread, root namespace, and checkpoint ID. Read through
-   `validate_branch_checkpoint` and `ResponseCheckpointSaver`. The returned tuple
-   and payload must match the selected identity, with no next tasks or interrupts.
-   Validation failure prevents execution.
-3. **Execute and save.** Shallow-copy the graph and attach a request-local saver
-   wrapper; leave the application's graph and saver unchanged. Pass current input
-   and instructions, using the checkpoint for prior state. Run with
-   `durability="sync"` and `updates`, `messages`, and `checkpoints` stream modes.
-4. **Publish progress.** For each graph checkpoint event, await
-   `wait_for_checkpoint` until the underlying saver write succeeds. Then update
-  the checkpoint reference in `TaskStorageManager`, flush output events, and
-  emit `stream.checkpoint()` to request the SDK recovery snapshot. The graph
-  event alone does not confirm the graph write, and the snapshot request does
-  not confirm SDK persistence.
-5. **Finish.** After shutdown/cancellation checks and pending interrupt emission,
-   emit `response.completed` for SDK finalization. Request `store` controls
-  terminal response retention. A retained response keeps the same confirmed
-  final checkpoint reference.
+### Internal metadata and ownership
 
-Graph writes and SDK response storage are **not a transaction**. A graph
-checkpoint alone cannot make a reusable parent: its response must also be stored
-and completed, and its output and restored graph state must satisfy the current
-finished-parent requirements. A response whose graph pauses for a tool result or
-approval is not a reusable parent within this scope.
+Recovery must distinguish the current response's progress from a sibling's
+checkpoints in the same thread. An ownership record in graph checkpoint metadata
+stores the response and parent identities.
 
-### Shared checkpoint adaptation
+A **response key** is the response ID, prefixed with
+`user-<SHA-256 hex digest of user_id_key>:` when the platform supplies a nonempty
+`user_id_key`. A root thread uses this key, which is separate from backend
+`user_isolation`.
 
-`ResponseCheckpointSaver` lives in the existing task-storage module. It is a
-request-local asynchronous hosting adapter shared by branching and ordinary
-checkpointed execution, not another storage backend or general-purpose saver.
-The application's graph and saver retain storage and lifecycle ownership.
+| Field | Purpose |
+| --- | --- |
+| `langgraph_thread_id`, `langgraph_checkpoint_id` | Checkpoint reference in SDK progress metadata. |
+| `langgraph_response_branching="checkpoint-v1"` | Execution mode selected when the request was accepted. Recovery uses this mode, even if the server flag later changes. |
+| `langgraph_response_execution` | Graph ownership record: JSON-encoded `[response_key, parent_response_id]`. The parent is `null` for a root. Private subgraph checkpoints do not carry this record. |
 
-The adapter supplies exact reads, response-owned native recovery, and graph-write
-confirmation before SDK progress publication. Synchronous private-subgraph calls
-pass through without touching root progress; native subgraph replay delegates
-history queries. Serialization and channel-version allocation also remain with
-the application saver. Root progress confirmation needs no cross-thread futures
-or locks.
+Middleware strips client mode headers. Inconsistent saved recovery mode causes
+recovery to fail.
 
-Branch preparation selects an authorized parent and checks its eligibility so
-the child starts from the intended finished state. A fresh child's parent lookup
-is reused during configuration preparation. The saver adapter validates reads
-and confirms graph writes so SDK progress references identify restorable state.
-Completion retains the last confirmed progress reference for later children.
-Recovery validates response ownership during the checkpoint read: valid owned
-progress needs no parent lookup, while a child without progress re-reads its
-parent. Roots need no parent lookup.
+### Native recovery and output
 
-### Internal metadata and isolation
-
-Because several responses can share a thread, recovery must identify which
-response produced a progress checkpoint. The graph ownership stamp records the
-response and its parent so recovery cannot select a sibling's progress.
-
-- SDK progress fields: `langgraph_thread_id` and `langgraph_checkpoint_id`.
-- Admitted mode: `langgraph_response_branching="checkpoint-v1"`. Recovery uses
-  the original mode, not the current server flag. Middleware strips client mode
-  headers; inconsistent recovery mode fails.
-- Graph ownership: `langgraph_response_execution` stores the JSON-encoded array
-  `[response_key, parent_response_id]`; the parent is `null` for a root response.
-  Private subgraph checkpoints are not stamped.
-- A root thread uses the response key: the response ID prefixed with
-  `user-<SHA-256 hex digest of user_id_key>:` when a nonempty platform
-  `user_id_key` is present. This is separate from backend `user_isolation`.
-
-### Recovery details
-
-After configuration hooks and saver setup, validate that saved root or child
-progress belongs to the current response key and requested parent, if any.
-Matching the thread alone is insufficient. Ownership is checked in the graph's
+After configuration hooks and saver setup, validate ownership during the graph
 checkpoint read, without a separate preflight read. Branching requires a matching
-stamp; ordinary recovery also rejects mismatched stamps but accepts absent
-stamps for compatibility with pre-adapter snapshots.
+ownership record. Ordinary recovery rejects mismatched records but accepts
+missing records for compatibility with snapshots created before this adapter.
 
-Valid progress needs no parent lookup. A child without progress re-validates its
-stored parent; a root without progress replays its original request.
+`ResponseCheckpointSaver.resume_config` removes `checkpoint_id` from the config
+passed to LangGraph for native resume. The adapter keeps the exact reference
+locally for that request and uses it for root reads and writes without an explicit
+ID. This reference advances only after a successful save with the expected thread,
+namespace, and new checkpoint ID.
 
-`ResponseCheckpointSaver.resume_config` removes the outward `checkpoint_id`
-for native resume, retaining the exact reference as a request-local recovery
-head. Root reads and writes without an explicit ID use that head. It advances
-only after a successful save with the expected thread, namespace, and new ID.
-Pending writes retain task IDs and supported task paths, so a newer sibling
-cannot redirect recovery reads or receive this response's writes.
+Pending writes retain task IDs and supported task paths. A newer sibling cannot
+redirect recovery reads or receive the current response's writes. Valid progress
+needs no parent lookup; a child without progress must re-read its parent, as
+shown in the [recovery table](#background-recovery).
 
-The stream starts from persisted output. The converter restores missing text
-from completed nodes' cached updates and records emitted message IDs to avoid
+The stream starts with persisted output. The converter restores missing text
+from completed nodes' cached updates and tracks emitted message IDs to avoid
 appending persisted text again.
 
 ### Source entry points
 
+Existing hosting modules:
+
 - [Responses handler](../../langchain_azure_ai/agents/hosting/_responses_host.py):
   `build_runnable_config`, `handle_create`, and `_new_stream`.
-- [Branch preparation](../../langchain_azure_ai/agents/hosting/_responses/branching.py):
-  admission, parent selection, and eligibility after configuration hooks.
-- [Task storage and checkpoint adaptation](../../langchain_azure_ai/agents/hosting/_responses/task_storage_manager.py):
-  shared progress references, exact reads, ownership, persistence barriers, and
-  native recovery heads.
+- [Task storage](../../langchain_azure_ai/agents/hosting/_responses/task_storage_manager.py):
+  checkpoint references and SDK task metadata.
 - [Graph-stream conversion](../../langchain_azure_ai/agents/hosting/_converters/_stream.py):
-  graph persistence before SDK progress publication.
-- [Branching tests](../../tests/unit_tests/agents/hosting/test_response_branching.py):
-  existing parent preservation, concurrent sibling, failure, and recovery coverage.
-  The target contract below requires additional compatibility coverage.
+  graph streaming and response output conversion.
+
+[Implementation PR #1206](https://github.com/langchain-ai/langchain-azure/pull/1206)
+also proposes these entry points:
+
+- `agents/hosting/_responses/branching.py`: parent selection and eligibility
+  checks after configuration hooks.
+- `ResponseCheckpointSaver` in the task-storage module: exact reads, ownership
+  checks, graph-write confirmation, and native recovery.
+- `tests/unit_tests/agents/hosting/test_response_branching.py`: parent preservation,
+  concurrent siblings, failures, and recovery coverage.
 
 The branching helpers and saver wrapper are internal, not public extension points.
 
 ## Implementation gaps and verification
 
-This revision changes the specification only. Implementation gaps and unverified
-behavior are distinguished below; neither indicates completed support.
+| Topic | Target contract | Status |
+| --- | --- | --- |
+| Response storage provider | Accept the host default or an explicit server `store=provider` override. | Automatic provider selection already exists and must remain available when branching is enabled. |
+| Request-scoped `instructions` | Do not inherit the parent's top-level instructions through its checkpoint. | Check checkpoint restoration against this rule. |
 
-| Topic                              | Target contract                                                                                                                                            | Implementation status                                                                                                                                        |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Response storage provider          | Accept the host's default provider or an explicit `store=provider` override.                                                                                 | Automatic provider selection already exists and must remain available when branching is enabled.                                                            |
-| Request-scoped `instructions`      | Do not inherit the parent's top-level instructions through its checkpoint.                                                                                 | **Verification required:** Check checkpoint restoration against this rule.                                                                                   |
+Before claiming compatibility, verify these observable scenarios:
 
-**Future scope:** Branching from paused parent graphs, including isolation of
-tool replies, approval decisions, and resume state between children, is deferred.
-Ordinary tool and approval continuation keeps its existing behavior.
-
-Before claiming compatibility, cover these observable scenarios:
-
-- The host's default provider and a history-preserving saver enable branching.
-  Cover local `FileResponseStore`, Foundry `FoundryStorageProvider`, and an
-  explicit provider override. Omitting `store` must not fail initialization;
-  boolean constructor values are not response providers.
+- The default provider and a history-preserving saver enable branching. Cover
+  local `FileResponseStore`, Foundry `FoundryStorageProvider`, and an explicit
+  provider override. Omitting server `store` must not fail initialization; boolean
+  constructor values are not providers.
 - B and C can select A independently, including when a newer sibling exists.
   A child with `store=False` does not delete or modify its stored parent.
-- In-progress, failed, and cancelled parents receive a 4xx error under the common
-  error contract before graph execution, without waiting or falling back to
-  another response or intermediate progress.
-- A stored, eligible response created in a conversation can be selected using
-  only `previous_response_id` when ordinary continuation admits that parent,
-  even after newer responses exist. Its branch uses the selected response's exact
-  checkpoint, not the conversation's latest state. Conversation-head effects
-  are not part of this verification.
-- Return matched function outputs and approved or denied MCP decisions through
+- In-progress, failed, and cancelled parents receive a 4xx error before graph
+  execution, without waiting or selecting another response or intermediate state.
+- An eligible response stored in a conversation can be selected using only
+  `previous_response_id` when ordinary continuation allows it, even after newer
+  responses exist. Its branch uses that response's exact checkpoint. Conversation
+  head effects remain outside this verification.
+- Matched function outputs and approved or denied MCP decisions work through
   the same linkage used for ordinary continuation.
-- Verify HTTP errors, error objects, terminal SSE events, and absence of graph
-  execution on caller-input failures, not only internal helper results.
+- HTTP errors, error objects, terminal SSE events, and absence of graph execution
+  on caller-input failures match the public contract. Helper-level checks alone
+  do not establish this.
 
-The cited documentation and service verification do not establish every edge
-case. Confirm these remaining cases against the service before claiming
-compatibility:
-
-- Exact status, error code, and parameter attribution for reference errors not
-  already specified above, including inaccessible resources and malformed
-  response references, reusing the common continuation rules.
-
-These are compatibility verification items, not permission to invent stricter
-branching-only rules or silently fall back to a different conversation or parent.
+Confirm remaining reference-error details against the service before claiming
+compatibility: exact status, error code, and parameter attribution for inaccessible
+resources and malformed response references not already specified above. Reuse
+ordinary continuation's rules without adding stricter branching-only rules or
+silently selecting another parent or conversation.
 
 ## TODO
 
-Investigate the cross-linkage case separately from the current branching
-requirements: A is stored in an explicit conversation, B uses
-`previous_response_id=A.id`, and C later uses the original `conversation` ID.
-Decide whether B advances that conversation's pointer and which parent and
-context C selects, without assuming that B is included or excluded.
+Investigate this cross-linkage case separately:
 
-If the common continuation rules allow a request to select B, branching restores
-B's persisted exact checkpoint reference and creates an independent child.
-Otherwise, the request is rejected under those rules; branching does not decide
-which parent a conversation request selects.
+1. A is stored in an explicit conversation.
+2. B selects A with `previous_response_id=A.id`.
+3. C later uses the original `conversation` ID.
+
+Determine whether B advances that conversation's pointer and which parent and
+context C selects. If ordinary continuation allows selecting B, branching uses
+B's exact checkpoint. Otherwise, reject the request under those continuation
+rules. Branching does not define conversation-head selection or pointer timing.
