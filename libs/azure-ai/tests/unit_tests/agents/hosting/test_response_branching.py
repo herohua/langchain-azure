@@ -418,12 +418,19 @@ def test_exact_parent_from_an_ordinary_conversation_survives_newer_turns() -> No
     assert calls[-1] == ["A", "B"]
 
 
-def test_hooks_and_bound_configuration_cannot_redirect_a_branch() -> None:
+@pytest.mark.parametrize("call_super", [False, True])
+def test_hooks_and_bound_configuration_cannot_redirect_a_branch(
+    call_super: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class ConfiguredHost(ResponsesHostServer):
         async def build_runnable_config(
             self, request: CreateResponse, context: ResponseContext
         ) -> RunnableConfig:
-            config = await super().build_runnable_config(request, context)
+            config = (
+                await super().build_runnable_config(request, context)
+                if call_super
+                else {"configurable": {}}
+            )
             config["configurable"].update(
                 thread_id="hook-thread",
                 checkpoint_ns="hook:private",
@@ -435,6 +442,9 @@ def test_hooks_and_bound_configuration_cannot_redirect_a_branch() -> None:
     provider = InMemoryResponseProvider()
     with TestClient(ResponsesHostServer(graph, store=provider).app) as client:
         parent = _create(client, input="A")
+    get_response = provider.get_response
+    lookup = AsyncMock(wraps=get_response)
+    monkeypatch.setattr(provider, "get_response", lookup)
     graph = graph.with_config(
         {
             "configurable": {
@@ -447,8 +457,9 @@ def test_hooks_and_bound_configuration_cannot_redirect_a_branch() -> None:
     server = ConfiguredHost(graph, store=provider, enable_response_branching=True)
     with TestClient(server.app) as client:
         child = _create(client, input="B", previous_response_id=parent["id"])
+        assert lookup.await_count == 1
         assert client.portal is not None
-        stored = client.portal.call(provider.get_response, parent["id"])
+        stored = client.portal.call(get_response, parent["id"])
     assert _text(child) == "A|B"
     assert _config(cast(Any, stored))["configurable"]["thread_id"] == parent["id"]
     assert graph.config is not None

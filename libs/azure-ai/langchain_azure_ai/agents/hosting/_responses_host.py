@@ -104,8 +104,6 @@ from ._responses import (
     TaskStorageManager,
 )
 from ._responses.branching import (
-    branch_selection_cache,
-    branch_selection_scope,
     select_branch_checkpoint,
     validate_branch_checkpoint,
     validate_branching_saver,
@@ -155,6 +153,7 @@ ResolvedConversationManagementMode = Literal[
 ]
 
 METADATA_STEERABLE_CONVERSATION = "foundry.agent.steerable_conversation"
+_BRANCH_CHECKPOINT_REF_CONFIG_KEY = "__langchain_azure_branch_checkpoint_ref"
 _RECOVERY_STREAM_LOCK_WORKAROUND = "_langchain_azure_recovery_stream_lock"
 
 
@@ -722,9 +721,11 @@ class ResponsesHostServer:
         """
         if self._uses_response_branching(request, context):
             reference = await select_branch_checkpoint(request, context)
-            return HostingRunnableConfig.create_from_checkpoint(
+            config = HostingRunnableConfig.create_from_checkpoint(
                 reference, context
             ).runnable_config
+            config["configurable"][_BRANCH_CHECKPOINT_REF_CONFIG_KEY] = reference
+            return config
         hosting_config = await self._resolve_thread_config(request, context)
         if not self._graph_has_checkpointer:
             return hosting_config.runnable_config
@@ -993,7 +994,11 @@ class ResponsesHostServer:
             # shortcut: keep existing recovery until response-owned recovery lands.
             branch_execution = self._uses_response_branching(request, context)
             if branch_execution:
-                reference = await select_branch_checkpoint(request, context)
+                reference = (config.get("configurable") or {}).get(
+                    _BRANCH_CHECKPOINT_REF_CONFIG_KEY
+                )
+                if not isinstance(reference, CheckpointRef):
+                    reference = await select_branch_checkpoint(request, context)
                 graph = copy(graph)
                 config = merge_configs(graph.config, config)
                 graph.config = None
@@ -1201,7 +1206,6 @@ class ResponsesHostServer:
         cancellation_signal: asyncio.Event,
     ) -> AsyncIterator[Any]:
         features = self._hosting_features
-        selections = branch_selection_cache()
         with closing(_CheckpointReadContext()) as checkpoint_reads:
             async with state_store_client_scope(bind=False) as factory:
                 events = self.handle_create(request, context, cancellation_signal)
@@ -1212,7 +1216,6 @@ class ResponsesHostServer:
                         with (
                             factory.bind(),
                             checkpoint_reads.bind(),
-                            branch_selection_scope(selections),
                             _hosting_feature_scope(features),
                         ):
                             await _close_resource(close, "handler_iterator", factory)
@@ -1223,7 +1226,6 @@ class ResponsesHostServer:
                         with (
                             factory.bind(),
                             checkpoint_reads.bind(),
-                            branch_selection_scope(selections),
                             _hosting_feature_scope(features),
                         ):
                             try:

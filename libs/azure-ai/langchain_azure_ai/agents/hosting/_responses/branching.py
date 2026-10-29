@@ -6,9 +6,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from azure.ai.agentserver.responses import (
@@ -45,29 +42,6 @@ def validate_branching_saver(saver: object) -> BaseCheckpointSaver:
     return saver
 
 
-_SelectionKey = tuple[int, str | None, str | None, str]
-_SelectionCache = dict[_SelectionKey, CheckpointRef]
-_selections: ContextVar[_SelectionCache | None] = ContextVar(
-    "langchain_azure_branch_selection", default=None
-)
-
-
-def branch_selection_cache() -> _SelectionCache:
-    """Return the selections bound to the current handler invocation."""
-    cache = _selections.get()
-    return cache if cache is not None else {}
-
-
-@contextmanager
-def branch_selection_scope(selections: _SelectionCache) -> Iterator[None]:
-    """Share parent selection across SDK generator-resumption tasks."""
-    token = _selections.set(selections)
-    try:
-        yield
-    finally:
-        _selections.reset(token)
-
-
 async def validate_branch_checkpoint(
     graph: CompiledStateGraph, config: RunnableConfig
 ) -> StateSnapshot:
@@ -92,7 +66,7 @@ async def select_branch_checkpoint(
     request: CreateResponse,
     context: ResponseContext,
 ) -> CheckpointRef:
-    """Resolve and validate one authorized parent, once per request."""
+    """Resolve and validate the selected completed parent."""
     parent_id = request.get("previous_response_id")
     if not isinstance(parent_id, str) or not parent_id.strip():
         raise RequestValidationError(
@@ -108,10 +82,6 @@ async def select_branch_checkpoint(
     if not isinstance(provider, ResponseProviderProtocol):
         raise RuntimeError("The Responses host has no response storage provider.")
     platform = context.platform_context
-    key = (id(provider), platform.user_id_key, platform.call_id, parent_id)
-    cache = _selections.get()
-    if cache is not None and key in cache:
-        return cache[key]
     try:
         parent = await provider.get_response(parent_id, context=platform)
     except KeyError as exc:
@@ -158,6 +128,4 @@ async def select_branch_checkpoint(
         )
     if reference is None:
         raise RuntimeError("The parent has no saved graph checkpoint.")
-    if cache is not None:
-        cache[key] = reference
     return reference
