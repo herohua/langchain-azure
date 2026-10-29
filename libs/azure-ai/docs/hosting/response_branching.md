@@ -10,19 +10,13 @@ called the **parent**, using `previous_response_id`. The host restores the
 checkpoint where its graph finished and processes your new input. Use it to
 continue from an answer, try a different direction, or regenerate an answer.
 
-This target design provides checkpoint-based branching through
-`ResponsesHostServer`, disabled by default; it does not establish availability
-in a published version.
+Response branching uses graph checkpoints through `ResponsesHostServer` and is
+disabled by default.
 **It requires a stored parent and its exact graph checkpoint.**
 The server uses a **response storage provider** for response records, separate
 from the graph checkpointer. Branching accepts the host's default provider:
 `FileResponseStore` locally or `FoundryStorageProvider` on Foundry. Passing
 server `store=provider` optionally overrides that default.
-
-> **Specification status:** This document defines the target contract, not a
-> claim of full implementation. Current behavior, implementation gaps, and
-> deferred scope are listed under
-> [Implementation gaps and verification](#implementation-gaps-and-verification).
 
 ## OpenAI compatibility target
 
@@ -31,7 +25,6 @@ Public HTTP request and response behavior under `/responses` must follow the
 and [conversation-state guide](https://developers.openai.com/api/docs/guides/conversation-state).
 The [OpenAI quickstart](https://developers.openai.com/api/docs/quickstart?tool-type=web-search)
 provides the client usage baseline; the API reference defines the field semantics.
-This does not add OpenAI-hosted models or built-in tools to the configured graph.
 
 This specification does not require the default host to expose `/conversations`
 or its item-management routes. The `/responses` request field `conversation`
@@ -96,9 +89,6 @@ head. Whether that branch advances the original conversation's head is a separat
 cross-linkage question tracked under [TODO](#todo).
 
 ## Quick start
-
-**Target-design example:** This setup illustrates the intended contract, not
-verified support in a published version.
 
 ### 1. Enable branching on the server
 
@@ -362,9 +352,6 @@ again. Keep the checkpoint history needed to restore the response's state.
 
 ## Implementation notes
 
-The following details are for maintainers; applications do not need to manage
-these fields or call these helpers.
-
 Branching adds exact starting-state selection to the existing hosting path,
 not a separate execution or recovery subsystem. Configuration and input hooks,
 graph streaming, output conversion, progress persistence, and SDK finalization
@@ -493,9 +480,6 @@ The branching helpers and saver wrapper are internal, not public extension point
 
 ## Implementation gaps and verification
 
-This revision changes the specification only. Implementation gaps and unverified
-behavior are distinguished below; neither indicates completed support.
-
 | Topic                              | Target contract                                                                                                                                            | Implementation status                                                                                                                                        |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Response storage provider          | Accept the host's default provider or an explicit `store=provider` override.                                                                                 | Automatic provider selection already exists and must remain available when branching is enabled.                                                            |
@@ -505,7 +489,7 @@ behavior are distinguished below; neither indicates completed support.
 tool replies, approval decisions, and resume state between children, is deferred.
 Ordinary tool and approval continuation keeps its existing behavior.
 
-Before claiming compatibility, cover these observable scenarios:
+Compatibility verification covers these observable scenarios:
 
 - The host's default provider and a history-preserving saver enable branching.
   Cover local `FileResponseStore`, Foundry `FoundryStorageProvider`, and an
@@ -526,16 +510,14 @@ Before claiming compatibility, cover these observable scenarios:
 - Verify HTTP errors, error objects, terminal SSE events, and absence of graph
   execution on caller-input failures, not only internal helper results.
 
-The cited documentation and service verification do not establish every edge
-case. Confirm these remaining cases against the service before claiming
-compatibility:
+Verify the remaining reference-error details against the service:
 
 - Exact status, error code, and parameter attribution for reference errors not
   already specified above, including inaccessible resources and malformed
   response references, reusing the common continuation rules.
 
-These are compatibility verification items, not permission to invent stricter
-branching-only rules or silently fall back to a different conversation or parent.
+Reference errors follow ordinary continuation's rules. Do not add stricter
+branching-only rules or silently substitute another conversation or parent.
 
 ## TODO
 
