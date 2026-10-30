@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Final, TypeGuard
 
@@ -61,6 +62,8 @@ from azure.ai.agentserver.responses.models._generated import (
     OutputItemMcpApprovalRequest,
 )
 from langchain_core.runnables import Runnable, RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.pregel._task_status import read_task_statuses
 from langgraph.types import Command, Interrupt
 
 if TYPE_CHECKING:
@@ -117,13 +120,10 @@ async def detect_pending_interrupts(
 ) -> tuple[Interrupt, ...]:
     """Return the interrupts pending on the checkpointed state, if any.
 
-    ``StateSnapshot.interrupts`` accumulates every interrupt recorded on the
-    checkpoint and is *not* pruned as they are answered, so after a partial
-    resume of parallel interrupts it may still report the ones already
-    satisfied. Deriving the list from ``StateSnapshot.tasks`` and skipping
-    tasks that produced node output keeps the initial lookup aligned with
-    what is outstanding in the common case. After a graph invocation,
-    :func:`track_pending_interrupts` provides the authoritative active set.
+    Read active interrupts from the selected checkpoint's task writes using
+    LangGraph task status. Finished siblings are excluded even when their
+    result is empty. Snapshot history alone can retain answered interrupts.
+    After execution, track_pending_interrupts supplies the active stream set.
 
     Args:
         graph: The runnable to inspect. Runnables without an ``aget_state``
@@ -133,37 +133,146 @@ async def detect_pending_interrupts(
     Returns:
         A tuple of :class:`Interrupt` objects (empty when none pending or
         when the graph has no checkpointer attached).
+
+    Raises:
+        Exception: If a configured checkpoint cannot be read.
     """
     get_state = getattr(graph, "aget_state", None)
     if get_state is None:
         return ()
-    try:
-        snapshot: "StateSnapshot | None" = await get_state(config)
-    except Exception:  # noqa: BLE001
-        # No checkpointer / unknown thread / provider error — treat as
-        # "nothing pending" and let the regular path run.
-        logger.debug("aget_state failed; assuming no pending interrupts", exc_info=True)
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is False or (
+        hasattr(graph, "checkpointer") and checkpointer is None
+    ):
         return ()
+    snapshot: "StateSnapshot | None" = await get_state(config)
     if snapshot is None:
         return ()
     tasks = tuple(getattr(snapshot, "tasks", None) or ())
-    pending_tasks = tuple(
-        task for task in tasks if getattr(task, "result", None) is None
-    )
-    if not pending_tasks:
-        # A node with several sequential interrupt() calls can retain a partial
-        # empty result while pausing again. In that case there is no result-less
-        # sibling, so its current interrupt is still active.
-        pending_tasks = tasks
+    if not tasks:
+        return ()
+    if isinstance(checkpointer, BaseCheckpointSaver):
+        saved = await checkpointer.aget_tuple(snapshot.config)
+        if saved is None:
+            raise RuntimeError(
+                "The selected LangGraph checkpoint is no longer available."
+            )
+        statuses = read_task_statuses(saved.pending_writes or ())
+        interrupt_groups = (
+            statuses[task.id].pending_interrupts
+            for task in tasks
+            if task.id in statuses
+        )
+    else:
+        pending_tasks = (
+            tuple(task for task in tasks if getattr(task, "result", None) is None)
+            or tasks
+        )
+        interrupt_groups = (
+            getattr(task, "interrupts", None) or () for task in pending_tasks
+        )
 
     seen: set[str] = set()
     pending: list[Interrupt] = []
-    for task in pending_tasks:
-        for it in getattr(task, "interrupts", None) or ():
+    for interrupts in interrupt_groups:
+        for it in interrupts:
             if isinstance(it, Interrupt) and it.id not in seen:
                 seen.add(it.id)
                 pending.append(it)
     return tuple(pending)
+
+
+class IncompleteResumeError(ValueError):
+    """An incomplete continuation batch.
+
+    Args:
+        message: Client-facing validation message.
+        param: Invalid input parameter, or None for MCP approvals.
+    """
+
+    def __init__(self, message: str, *, param: str | None = "input") -> None:
+        super().__init__(message)
+        self.param = param
+
+    def as_error(self) -> dict[str, Any]:
+        """Return the Responses invalid-request error object.
+
+        Returns:
+            Error fields suitable for a Responses HTTP 400 envelope.
+        """
+        return {
+            "message": str(self),
+            "type": "invalid_request_error",
+            "param": self.param,
+            "code": None,
+        }
+
+
+def _is_resume_map(value: Any) -> TypeGuard[dict[str, Any]]:
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key) for key in value
+    )
+
+
+def validate_resume_command(
+    command: Command | None,
+    pending: Sequence[Interrupt],
+    *,
+    items: Sequence[Any] = (),
+    output_items: Sequence[Any] = (),
+    rejecting: bool = False,
+) -> None:
+    """Require a normalized continuation to answer every pending interrupt.
+
+    Args:
+        command: The command produced by the host's input hook.
+        pending: Interrupts at the selected checkpoint.
+        items: Current input items, including MCP decisions.
+        output_items: Prior output items retaining emitted MCP request IDs.
+        rejecting: Whether the whole batch is rejected without graph execution.
+
+    Raises:
+        IncompleteResumeError: If the command leaves an interrupt unanswered.
+    """
+    if not pending:
+        return
+    answered: set[str] = set()
+    if command is not None and command.resume is not None:
+        resume = command.resume
+        is_map = _is_resume_map(resume)
+        if is_map:
+            answered.update(it.id for it in pending if it.id in resume)
+        elif len(pending) == 1:
+            answered.add(pending[0].id)
+        else:
+            raise IncompleteResumeError(
+                "Parallel interrupts require a resume map keyed only by interrupt IDs."
+            )
+    pending_ids = {it.id for it in pending}
+    if rejecting:
+        answered.update(
+            _interrupt_id_from_approval_id(item["approval_request_id"], pending_ids)
+            for item in items
+            if _is_mcp_approval_response(item)
+        )
+    missing = [it.id for it in pending if it.id not in answered]
+    if not missing:
+        return
+    if any(_is_mcp_approval_response(it) for it in items) and not any(
+        _is_function_call_output(it) for it in items
+    ):
+        approval_ids = {key: f"mcpr_{_approval_id_suffix(key)}" for key in missing}
+        for item in output_items:
+            if isinstance(item, dict) and item.get("type") == "mcp_approval_request":
+                key = _interrupt_id_from_approval_id(item.get("id", ""), pending_ids)
+                if key in approval_ids:
+                    approval_ids[key] = item["id"]
+        raise IncompleteResumeError(
+            "The following MCP approval requests do not have an approval: "
+            + ", ".join(approval_ids.values()),
+            param=None,
+        )
+    raise IncompleteResumeError(f"No tool output found for function call {missing[0]}.")
 
 
 async def track_pending_interrupts(
@@ -433,11 +542,11 @@ def parse_resume_command(
                 update=command.update,
                 goto=command.goto,
             )
-        elif has_resume and command.resume is None:
+        elif has_resume and (command.resume is None or _is_resume_map(command.resume)):
             # ``Command(resume=None)`` means no resume; an id-keyed map is
-            # required to pass an explicit null value through to interrupt().
+            # required to pass null or an ID-shaped dictionary as the answer.
             command = Command(
-                resume={interrupt_id: None},
+                resume={interrupt_id: command.resume},
                 update=command.update,
                 goto=command.goto,
             )
@@ -680,7 +789,7 @@ def _decode_command(output: Any) -> tuple[Command, bool] | None:
     if isinstance(output, str):
         text = output.strip()
         if not text:
-            return None
+            return Command(resume=output), True
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError:
@@ -695,7 +804,7 @@ def _decode_command(output: Any) -> tuple[Command, bool] | None:
         ]
         joined = "".join(p for p in text_parts if p)
         if not joined:
-            return None
+            return Command(resume=output), True
         return _decode_command(joined)
     if isinstance(output, dict):
         return _command_from_object(output)

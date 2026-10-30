@@ -11,6 +11,7 @@ from ._final import state_to_events
 from ._hitl import (
     HITL_FUNCTION_NAME,
     HITL_MCP_SERVER_LABEL,
+    IncompleteResumeError,
     detect_pending_interrupts,
     emit_interrupts,
     hitl_call_ids,
@@ -19,6 +20,7 @@ from ._hitl import (
     parse_resume_command,
     track_pending_interrupts,
     validate_approval_responses,
+    validate_resume_command,
 )
 from ._request import (
     build_messages_input,
@@ -34,6 +36,8 @@ from ._utils import (
 )
 
 __all__ = [
+    "IncompleteResumeError",
+    "validate_resume_command",
     "HITL_FUNCTION_NAME",
     "HITL_MCP_SERVER_LABEL",
     "build_messages_input",

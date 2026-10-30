@@ -40,7 +40,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 try:
-    from azure.ai.agentserver.core import resolve_state_subdir
+    from azure.ai.agentserver.core import (
+        FoundryAgentRequestContext,
+        reset_request_context,
+        resolve_state_subdir,
+        set_request_context,
+    )
+    from azure.ai.agentserver.core.platform_headers import ERROR_SOURCE
     from azure.ai.agentserver.core.streaming import EventStream, streams
     from azure.ai.agentserver.responses import (
         ResponseContext,
@@ -63,6 +69,7 @@ except ImportError as exc:
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from starlette.responses import JSONResponse, Response
 
 from langchain_azure_ai._api.base import experimental
 from langchain_azure_ai.agents.hosting import (
@@ -79,6 +86,7 @@ from ._checkpoint._checkpoint_reuse import (
     _RequestCheckpointSaver,
 )
 from ._converters import (
+    IncompleteResumeError,
     UsageAccumulator,
     build_messages_input,
     detect_pending_interrupts,
@@ -88,6 +96,7 @@ from ._converters import (
     stream_graph_to_events,
     track_pending_interrupts,
     validate_approval_responses,
+    validate_resume_command,
 )
 from ._responses import (
     CONVERSATION_CHECKPOINT_KEY,
@@ -499,9 +508,83 @@ class ResponsesHostServer:
 
         self._log_conversation_management_selection()
         _install_recovery_stream_lock_workaround(self._app)
+        if self._graph_has_checkpointer:
+            self._install_resume_validation()
 
         # Wire the create handler.
         self._app.response_handler(self._handle_create_async_gen)
+
+    def _install_resume_validation(self) -> None:
+        # shortcut: No public SDK admission hook; check this boundary on upgrades.
+        endpoint = self._app._endpoint
+        prefetch = getattr(endpoint, "_langchain_azure_history_prefetch", None)
+        if prefetch is None:
+            prefetch = endpoint._prefetch_history_ids
+            setattr(endpoint, "_langchain_azure_history_prefetch", prefetch)
+
+        @wraps(prefetch)
+        async def prefetch_and_validate(
+            execution: Any, *, span: Any, agent_session_id: str | None
+        ) -> Response | None:
+            error = await prefetch(
+                execution, span=span, agent_session_id=agent_session_id
+            )
+            if error is not None:
+                return error
+            context = execution.context
+            if self._is_response_branch(execution.parsed, context):
+                # Completed-parent branching owns its eligibility validation.
+                return None
+            token = set_request_context(
+                FoundryAgentRequestContext(
+                    user_id=context.platform_context.user_id_key or None,
+                    call_id=context.platform_context.call_id or None,
+                    session_id=agent_session_id,
+                )
+            )
+            headers = endpoint._session_headers(agent_session_id)
+            try:
+                async with state_store_client_scope():
+                    with closing(_CheckpointReadContext()) as reads, reads.bind():
+                        config = await self.build_runnable_config(
+                            execution.parsed, context
+                        )
+                        reads.pin(getattr(self._graph, "checkpointer", None), config)
+                        pending = await detect_pending_interrupts(self._graph, config)
+                        if pending:
+                            await self._prepare_resume_command(
+                                execution.parsed, context, pending
+                            )
+            except IncompleteResumeError as exc:
+                span.end(exc)
+                return JSONResponse(
+                    {"error": exc.as_error()},
+                    status_code=400,
+                    headers={**headers, ERROR_SOURCE: "user"},
+                )
+            except asyncio.CancelledError as exc:
+                span.end(exc)
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Responses continuation preflight failed")
+                span.end(exc)
+                return JSONResponse(
+                    {
+                        "error": {
+                            "message": "Internal server error.",
+                            "type": "server_error",
+                            "param": None,
+                            "code": "server_error",
+                        }
+                    },
+                    status_code=500,
+                    headers={**headers, ERROR_SOURCE: "upstream"},
+                )
+            finally:
+                reset_request_context(token)
+            return None
+
+        setattr(endpoint, "_prefetch_history_ids", prefetch_and_validate)
 
     # ------------------------------------------------------------------
     # Public accessors
@@ -725,6 +808,60 @@ class ResponsesHostServer:
         del request  # unused in the default implementation
         items = await context.get_input_items()
         return validate_approval_responses(items, pending)
+
+    async def validate_resume_input(
+        self,
+        request: CreateResponse,
+        context: ResponseContext,
+        pending: Sequence["Interrupt"],
+        resume_command: Optional["Command"],
+        *,
+        rejecting: bool = False,
+    ) -> None:
+        """Validate complete input after the custom resume hook has run.
+
+        This hook and the input/rejection hooks can run at admission and again
+        at execution. Overrides must not mutate state or accumulate answers.
+
+        Args:
+            request: Current parsed request.
+            context: Current response context.
+            pending: Interrupts at the selected checkpoint.
+            resume_command: Normalized executable command, if any.
+            rejecting: Whether the whole batch will fail without graph execution.
+
+        Raises:
+            IncompleteResumeError: If any pending interrupt is unanswered.
+        """
+        del request
+        items = await context.get_input_items()
+        try:
+            validate_resume_command(
+                resume_command, pending, items=items, rejecting=rejecting
+            )
+        except IncompleteResumeError as exc:
+            if exc.param is not None:
+                raise
+            validate_resume_command(
+                resume_command,
+                pending,
+                items=items,
+                output_items=await context.get_history(),
+                rejecting=rejecting,
+            )
+
+    async def _prepare_resume_command(
+        self,
+        request: CreateResponse,
+        context: ResponseContext,
+        pending: Sequence["Interrupt"],
+    ) -> tuple[Optional["Command"], frozenset[str], Optional[str]]:
+        rejection = await self.detect_rejection(request, context, pending)
+        command, consumed = await self.build_resume_command(request, context, pending)
+        await self.validate_resume_input(
+            request, context, pending, command, rejecting=rejection is not None
+        )
+        return command, consumed, rejection
 
     async def build_runnable_config(
         self,
@@ -1104,38 +1241,17 @@ class ResponsesHostServer:
                     # Rejection short-circuits the turn into ``response.failed``
                     # so a client-issued ``mcp_approval_response{approve:false}``
                     # is not silently dropped.
-                    approval_error = await self.detect_rejection(
-                        request, context, pending
-                    )
+                    (
+                        resume_command,
+                        consumed_call_ids,
+                        approval_error,
+                    ) = await self._prepare_resume_command(request, context, pending)
                     if approval_error is not None:
                         yield stream.emit_failed(
                             code="interrupt_rejected",
                             message=approval_error,
                         )
                         return
-                    resume_command, consumed_call_ids = await self.build_resume_command(
-                        request, context, pending
-                    )
-
-                if pending and resume_command is None:
-                    # Graph is paused but the client did not supply a matching
-                    # ``function_call_output``. Re-emitting the pending
-                    # interrupts (instead of driving the graph with fresh
-                    # input) keeps the conversation in a recoverable state and
-                    # avoids sending an unbalanced message list — with a
-                    # dangling ``AskHuman``-style tool_call — to the model.
-                    async for event in emit_interrupts(pending, stream):
-                        yield event
-                    ref = HostingRunnableConfig(config).checkpoint_ref
-                    if ref is not None:
-                        task_storage.store_checkpoint_ref(ref)
-                        await self._conversation_chain_store.set(
-                            conversation_chain_id,
-                            CONVERSATION_CHECKPOINT_KEY,
-                            ref.to_dict(),
-                        )
-                    yield stream.emit_completed()
-                    return
 
                 if resume_command is not None:
                     graph_input = resume_command
@@ -1199,6 +1315,12 @@ class ResponsesHostServer:
                     yield event
 
             yield stream.emit_completed(usage=usage.response_usage)
+        except IncompleteResumeError as exc:
+            yield stream.emit_failed(
+                code="invalid_request_error",
+                message=str(exc),
+                usage=usage.response_usage,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("LangGraph response handler failed")
             code, message = "server_error", "An internal error occurred."

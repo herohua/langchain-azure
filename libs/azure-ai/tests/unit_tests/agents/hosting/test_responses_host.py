@@ -251,7 +251,11 @@ async def test_background_recovery_survives_client_close_error(
     if custom_handler:
         monkeypatch.setattr(server, "handle_create", handler)
     else:
-        monkeypatch.setattr(server, "build_runnable_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            server,
+            "build_runnable_config",
+            AsyncMock(return_value={"configurable": {"thread_id": "recovery-close"}}),
+        )
         monkeypatch.setattr(
             server, "build_input", AsyncMock(return_value={"messages": []})
         )
@@ -711,7 +715,7 @@ async def test_early_handler_close_settles_graph_before_closing_clients(
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_requests_reuse_two_clients_and_restore_checkpoint_state(
+def test_admission_and_execution_reuse_clients_and_restore_checkpoint_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, streaming: bool
 ) -> None:
     from azure.ai.agentserver.core.storage import FoundryStateStore
@@ -790,12 +794,12 @@ def test_requests_reuse_two_clients_and_restore_checkpoint_state(
                 payload = response.json()
             assert payload["status"] == "completed", payload
             assert f"messages={2 * turn - 1}" in str(payload["output"])
-            assert len(created) == len(closed) == 2 * turn
-            assert len({id(store) for store in created}) == 2 * turn
+            assert len(created) == len(closed) == 4 * turn
+            assert len({id(store) for store in created}) == 4 * turn
             assert len({store.name for store in created}) == 2
-            assert len(reference_reads) == 1
+            assert len(reference_reads) == 2
             if turn == 2:
-                assert len(checkpoint_reads) == 2, checkpoint_reads
+                assert len(checkpoint_reads) == 3, checkpoint_reads
                 assert len(checkpoint_lists) == 1
 
 
