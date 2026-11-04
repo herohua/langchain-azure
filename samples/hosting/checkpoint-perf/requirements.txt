@@ -1,0 +1,5 @@
+-e ../../../libs/azure-ai[hosting]
+azure-ai-agentserver-core==2.2.0
+azure-ai-agentserver-responses==2.3.0
+langgraph==1.2.16
+httpx==0.28.1
