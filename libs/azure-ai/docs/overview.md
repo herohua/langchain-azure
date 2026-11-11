@@ -19,11 +19,9 @@ flowchart TB
         direction TB
         app["<b>Application code</b><br/>Define the workflow and configuration."]
         subgraph frameworks["<b>Frameworks</b>"]
-            direction LR
             deep["<b>Deep Agents</b><br/>Add planning, subagents, files, and skills."]
             langchain["<b>LangChain</b><br/>Define components and agent loops."]
             langgraph["<b>LangGraph</b><br/>Execute graphs and manage graph state."]
-            deep ~~~ langchain ~~~ langgraph
         end
         subgraph package["<b>langchain-azure-ai</b> · Adapt Azure services and hosting protocols."]
             models["<b>Models</b><br/>Chat / embeddings"]
@@ -37,8 +35,10 @@ flowchart TB
             agentClients["<b>Agent Service clients</b><br/>Azure AI Projects / OpenAI"]
             resourceClients["<b>Resource clients</b><br/>Azure service SDKs / MCP"]
         end
-        app ~~~ frameworks
-        frameworks ~~~ models & hosting & agents & integrations
+        app ~~~ deep & langchain & langgraph
+        deep ~~~ models
+        langchain ~~~ hosting & agents
+        langgraph ~~~ integrations
         models -->|depends on| providers
         hosting -->|depends on| server
         agents -->|depends on| agentClients
@@ -144,44 +144,24 @@ LangChain, LangGraph, and Deep Agents interfaces.
 | --- | --- | --- |
 | [Graph nodes](../langchain_azure_ai/agents/__init__.py) | `AgentServiceFactory`, `ResponsesAgentNode`, `AgentServiceAgentState` | Graph messages go to a remote Foundry agent; response items become graph state updates. The local graph handles local tools and approvals. |
 | [Tools, skills and MCPs](../langchain_azure_ai/tools/) | `AzureAIServicesToolkit`, service tools, `AzureAIProjectToolbox`, `tools.builtin` | Tool arguments produce service results. Toolbox supplies MCP tools, resources, and skills; built-in definitions configure server-side tools. |
-| [Checkpointers](../../azure-cosmosdb/README.md#langgraph-checkpointer) | `CosmosDBSaver`, `CosmosDBSaverSync` | Persist and load graph checkpoints and pending writes in Cosmos DB. |
-| [Stores](../../azure-cosmosdb/README.md#langgraph-store-long-term-memory) | `CosmosDBStore`, `AsyncCosmosDBStore` | Keys, values, and queries write or retrieve data shared across graph threads. |
+| [Checkpointers](../langchain_azure_ai/agents/hosting/_checkpoint/) | `FoundryCheckpointSaver` | Persist and load graph execution state in Foundry State Store. |
 | [Memory](../langchain_azure_ai/chat_history/) | `AzureAIMemoryChatMessageHistory`, `AzureAIMemoryRetriever`, `AzureAIMemoryMiddleware` | Forward selected messages to Foundry Memory for extraction; retrieve memories by store and scope. The base chat-history implementation owns the transcript. |
 | [Vector stores](../langchain_azure_ai/vectorstores/) and [retrievers](../langchain_azure_ai/retrievers/) | `AzureSearch`, `AzureAISearchRetriever` | Documents and vectors populate a search index; queries return LangChain documents. |
 | [Semantic cache](../langchain_azure_ai/vectorstores/cache.py) | `AzureCosmosDBMongoVCoreSemanticCache` | Model-scoped semantic lookup returns cached generations or records new ones. |
-| [Document loaders](../langchain_azure_ai/document_loaders/) | `AzureAIContentUnderstandingLoader`, `AzureBlobStorageLoader` | Source documents or media become LangChain documents with content and metadata. Content Understanding analyzes inputs; the Blob loader downloads and parses them. |
-| [Backends](../../azure-storage/README.md#deep-agents-azure-blob-storage-backend-usage) | `AzureBlobBackend` | Deep Agents file operations read or write workspace files in Blob Storage. |
+| [Document loaders](../langchain_azure_ai/document_loaders/) | `AzureAIContentUnderstandingLoader` | Content Understanding analyzes source documents or media and returns LangChain documents with content and metadata. |
+
+> **Related packages:** Cosmos DB checkpointers and Stores are provided by
+> [`langchain-azure-cosmosdb`](../../azure-cosmosdb/README.md). Blob document loading
+> and the Deep Agents filesystem backend are provided by
+> [`langchain-azure-storage`](../../azure-storage/README.md).
 
 **Additional dependencies:** `langchain-azure-ai[tools]` supplies SDKs for the
 service tools. Toolbox MCP tools and resources require `langchain-mcp-adapters`
 and `httpx`; Toolbox skill file mappings also require `deepagents`.
 
-**Separate packages:** Cosmos DB checkpointers and Stores come from
-`langchain-azure-cosmosdb`. The Blob document loader and filesystem backend
-come from `langchain-azure-storage`.
-
 `ResponsesAgentNode` calls a remote Foundry agent from the application's graph.
 `AgentServiceFactory` can create or reference that agent. See the
 [Agent Service examples](azure_ai_agents_demo_v2.ipynb).
-
-The graph can also access resources through tools, retrievers, loaders, and
-persistence interfaces. Applications can combine this package's components
-with a [Cosmos DB checkpointer or Store](../../azure-cosmosdb/README.md), a
-[Blob document loader](../../azure-storage/README.md#azure-blob-storage-document-loader-usage),
-or other LangChain integrations. Deep Agents can also load Toolbox skills into
-its files or backend and use
-[`AzureBlobBackend`](../../azure-storage/README.md#deep-agents-azure-blob-storage-backend-usage)
-for its file workspace. Checkpoints, long-term memory, source documents, and
-workspace files have separate roles. Each package owns its adapters and service
-configuration.
-
-The Cosmos DB vector-store, chat-history, NoSQL semantic-cache, and
-[query-translator](../langchain_azure_ai/query_constructors/cosmosdb_no_sql.py)
-compatibility modules forward to the separate `langchain-azure-cosmosdb` package. That
-package also provides graph checkpoint and Store implementations. The
-remaining semantic-cache implementation in this package uses its vector-store
-client. See the [Cosmos DB package](../../azure-cosmosdb/README.md) for those
-components and their installation requirements.
 
 ## Shared components
 
