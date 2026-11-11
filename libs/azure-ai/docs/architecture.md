@@ -11,20 +11,50 @@ Applications compose the integrations they need. A model, retriever, loader,
 or tool can run directly, inside a LangChain agent, or as part of a LangGraph
 workflow. Hosting exposes an application graph through an HTTP protocol.
 
+The diagram shows composition and service use. Dashed arrows mark optional
+application choices.
+
+```mermaid
+flowchart TB
+    app["Application"]
+    deep["Deep Agents (optional)"]
+    frameworks["LangChain and LangGraph"]
+
+    subgraph package["langchain-azure-ai"]
+        adapters["Azure component adapters"]
+        hosting["Graph hosting adapters"]
+    end
+
+    server["Agent Server SDK<br/>Core + Responses / Invocations"]
+    clients["Service client libraries"]
+    services["Azure services"]
+
+    app -->|defines graph with| frameworks
+    app -.-> deep
+    deep -->|builds on| frameworks
+    app -.-> hosting
+    hosting -->|executes graph with| frameworks
+    frameworks -->|invokes| adapters
+    hosting -->|uses| server
+    adapters -->|calls| clients
+    clients -->|requests| services
+    server -->|hosted storage| services
+```
+
 | Layer | Responsibility |
 | --- | --- |
 | Application | Select models and tools; define prompts, graph topology, middleware, persistence, and deployment configuration. |
+| Deep Agents (optional) | Build on LangChain and LangGraph with planning, subagents, filesystem backends, context management, and skills. Applications can use this package's models, tools, middleware, and Toolbox skills with it. |
 | LangChain and LangGraph | Define component interfaces, messages, agent loops, graph execution, interrupts, and checkpoint contracts. |
 | `langchain-azure-ai` | Resolve service configuration; adapt requests, results, events, and state to those interfaces; connect graphs to the hosting protocols. |
+| Agent Server SDK (`hosting` extra) | Core supplies ASGI serving, request context, storage clients, task infrastructure, and host lifecycle support. Responses and Invocations supply protocol endpoints and handler interfaces. |
 | Azure, OpenAI, Anthropic, and MCP client libraries | Provide service clients, authentication hooks, transport, and protocol types used by the adapters. |
 | Azure services | Execute remote models, agents, tools, analysis, search, memory, and evaluation operations; retain service-managed data. |
 
-Agent hosting also uses the Agent Server SDK. Its Core package supplies ASGI
-serving, request context, storage clients, task infrastructure, and host
-lifecycle support. Its Responses and Invocations packages supply protocol
-endpoints and handler interfaces. This package implements the graph handlers
-and their input, output, and execution-state mapping. The supported adapter
-behavior is described in the [hosting designs](#hosting-designs).
+The hosting adapters implement the graph handlers and their input, output,
+and execution-state mapping on the Agent Server SDK. See
+[Responses hosting](hosting/responses.md) and
+[Invocations hosting](hosting/invocations.md) for supported adapter behavior.
 
 ## Components
 
@@ -129,7 +159,7 @@ Persistent background recovery composes Agent Server task and protocol state
 with LangGraph checkpoints. The adapter selects saved progress and resumes
 the graph, or replays input when no progress was saved. Applications own the
 replay safety of external effects. Recovery boundaries and supported option
-combinations are defined in the hosting designs.
+combinations are defined in the protocol-specific hosting documents.
 
 ## State and resource ownership
 
@@ -220,18 +250,3 @@ versions, checks run, results, and material coverage limits. Distinguish source
 inspection, local or recorded execution, installed-package checks, and live
 Azure validation. A passing mock test establishes the behavior at that mocked
 boundary.
-
-## Hosting designs
-
-| Design | Detail owned by the document |
-| --- | --- |
-| [Responses hosting](hosting/responses.md) | Host configuration, calling modes, conversation state, interrupts, and recovery requirements. |
-| [Invocations hosting](hosting/invocations.md) | HTTP input/output, direct and task-backed execution, sessions, steering, interrupts, and recovery. |
-| [Responses resilience](hosting/response_resiliency.md) | Storage authorities, client lifetime, commit order, crash windows, and replay assumptions. |
-| [Response branching](hosting/response_branching.md) | Parent selection, checkpoint references, branch behavior, recovery, and implementation follow-ups. |
-
-Update this overview when component responsibilities or shared boundaries
-change. Feature designs own detailed behavior, architecture changes,
-compatibility effects, and acceptance cases. Mark planned behavior and
-implementation gaps beside the affected rules so reviewers can distinguish
-the target design from the current implementation.
