@@ -28,29 +28,29 @@ flowchart TB
         end
         subgraph package["<b>langchain-azure-ai</b> · Adapt Azure services and hosting protocols."]
             models["<b>Models</b><br/>Chat / embeddings"]
+            hosting["<b>Hosting</b><br/>Graph / protocol mapping"]
             agents["<b>Agent Service</b><br/>Remote agent nodes"]
             integrations["<b>Azure integrations</b><br/>Tools / data / observability"]
-            hosting["<b>Hosting</b><br/>Graph / protocol mapping"]
         end
         subgraph support["<b>Dependencies</b>"]
             providers["<b>Model provider libraries</b><br/>LangChain providers / OpenAI / Anthropic"]
+            server["<b>Agent Server SDK</b><br/>Serve protocol APIs and manage the host."]
             agentClients["<b>Agent Service clients</b><br/>Azure AI Projects / OpenAI"]
             resourceClients["<b>Resource clients</b><br/>Azure service SDKs / MCP"]
-            server["<b>Agent Server SDK</b><br/>Serve protocol APIs and manage the host."]
         end
         app ~~~ frameworks
-        frameworks ~~~ models & agents & integrations & hosting
+        frameworks ~~~ models & hosting & agents & integrations
         models -->|depends on| providers
+        hosting -->|depends on| server
         agents -->|depends on| agentClients
         integrations -->|depends on| resourceClients
-        hosting -->|depends on| server
     end
     subgraph remote["<b>Azure services</b> · Execute remote operations and retain service-managed data."]
         direction LR
         foundryModels["<b>Foundry models</b>"]
         foundryAgents["<b>Foundry Agent Service</b>"]
         foundryServices["<b>Foundry services</b><br/>State Store / Toolbox / Memory"]
-        azure["<b>Azure resources</b><br/>Search / storage / databases / other services"]
+        azure["<b>Azure resources</b><br/>Search / storage / databases / Sandbox / other services"]
         foundryModels ~~~ foundryAgents ~~~ foundryServices ~~~ azure
     end
     process ~~~ remote
