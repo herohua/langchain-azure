@@ -13,15 +13,15 @@ The architecture is organized into layers for application code, frameworks,
 Azure adapters, dependencies, and remote Azure services.
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 25}}}%%
+%%{init: {"themeVariables": {"fontSize": "14px"}, "flowchart": {"nodeSpacing": 8, "rankSpacing": 8, "padding": 6, "diagramPadding": 4, "subGraphTitleMargin": {"top": 0, "bottom": 6}}}}%%
 flowchart TB
     subgraph process["<b>Application process</b>"]
         direction TB
-        app["<b>Application code</b><br/>Define the workflow and configuration."]
+        app["<b>Application code</b><br/>Define the workflow."]
         subgraph frameworks["<b>Frameworks</b>"]
             deep["<b>Deep Agents</b><br/>Add planning, subagents, files, and skills."]
-            langchain["<b>LangChain</b><br/>Define components and agent loops."]
-            langgraph["<b>LangGraph</b><br/>Execute graphs and manage graph state."]
+            langchain["<b>LangChain</b><br/>Build components and agents."]
+            langgraph["<b>LangGraph</b><br/>Run graphs and manage state."]
         end
         subgraph package["<b>langchain-azure-ai</b> · Adapt Azure services and hosting protocols."]
             models["<b>Models</b><br/>Chat / embeddings"]
@@ -31,7 +31,7 @@ flowchart TB
         end
         subgraph support["<b>Dependencies</b>"]
             providers["<b>Model provider libraries</b><br/>LangChain providers / OpenAI / Anthropic"]
-            server["<b>Agent Server SDK</b><br/>Serve protocol APIs and manage the host."]
+            server["<b>Agent Server SDK</b><br/>Serve APIs and manage the host."]
             agentClients["<b>Agent Service clients</b><br/>Azure AI Projects / OpenAI"]
             resourceClients["<b>Resource clients</b><br/>Azure service SDKs / MCP"]
         end
@@ -49,7 +49,7 @@ flowchart TB
         foundryModels["<b>Foundry models</b>"]
         foundryAgents["<b>Foundry Agent Service</b>"]
         foundryServices["<b>Foundry services</b><br/>State Store / Toolbox / Memory"]
-        azure["<b>Azure resources</b><br/>Search / storage / databases / Sandbox / other services"]
+        azure["<b>Azure resources</b><br/>Search / storage / databases / Sandbox"]
         foundryModels ~~~ foundryAgents ~~~ foundryServices ~~~ azure
     end
     process ~~~ remote
