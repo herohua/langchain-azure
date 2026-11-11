@@ -61,11 +61,6 @@ flowchart TB
     classDef default fill:#ffffff,stroke:#94a3b8
 ```
 
-The hosting adapters implement the graph handlers and their input, output,
-and execution-state mapping on the Agent Server SDK. See
-[Responses hosting](hosting/responses.md) and
-[Invocations hosting](hosting/invocations.md) for supported adapter behavior.
-
 ## Scenarios and components
 
 The diagrams show how requests and results move through the components.
@@ -121,8 +116,9 @@ flowchart LR
 ```
 
 The application supplies a compiled graph with its models, tools, middleware,
-and persistence. Agent Server accepts HTTP requests. The hosting adapter
-translates between the protocol and the application graph. See
+and persistence. Agent Server accepts HTTP requests. The hosting adapters
+implement the graph handlers and their input, output, and execution-state
+mapping on the Agent Server SDK. See
 [Responses hosting](hosting/responses.md) and
 [Invocations hosting](hosting/invocations.md) for protocol behavior, interrupts,
 and recovery.
