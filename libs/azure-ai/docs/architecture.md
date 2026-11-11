@@ -19,7 +19,7 @@ flowchart TB
         app["Application code<br/>Define the workflow and configuration."]
         subgraph frameworks["Frameworks"]
             direction LR
-            deep["Deep Agents (optional)<br/>Add planning, subagents, files, and skills."]
+            deep["Deep Agents<br/>Add planning, subagents, files, and skills."]
             langchain["LangChain<br/>Define components and agent loops."]
             langgraph["LangGraph<br/>Execute graphs and manage graph state."]
             deep ~~~ langchain ~~~ langgraph
@@ -43,9 +43,10 @@ flowchart TB
     subgraph remote["Azure services · Execute remote operations and retain service-managed data."]
         direction LR
         foundryModels["Foundry models"]
-        foundryAgents["Foundry Agent Service / State Store"]
+        foundryAgents["Foundry Agent Service"]
+        foundryServices["Foundry services<br/>State Store / Toolbox / Memory"]
         azure["Azure resources<br/>Search / storage / databases / other services"]
-        foundryModels ~~~ foundryAgents ~~~ azure
+        foundryModels ~~~ foundryAgents ~~~ foundryServices ~~~ azure
     end
     process ~~~ remote
     style process fill:#f8fafc,stroke:#64748b
@@ -134,7 +135,7 @@ flowchart TB
     subgraph hosting["Foundry hosted agent container"]
         server["Agent Server SDK<br/>Responses / Invocations"]
         adapter["langchain-azure-ai<br/>Graph hosting adapter"]
-        workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents (optional)"]
+        workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents"]
         server -->|Protocol input| adapter
         adapter -->|Graph input| workflow
         workflow -.->|Graph output / events| adapter
@@ -155,7 +156,7 @@ and recovery.
 
 ```mermaid
 flowchart LR
-    workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents (optional)"]
+    workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents"]
     node["langchain-azure-ai<br/>ResponsesAgentNode"]
     agent["Foundry Agent Service<br/>Remote agent"]
     resources["langchain-azure-ai<br/>Azure tools / retrieval / loaders"]
