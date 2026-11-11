@@ -1,10 +1,11 @@
 # Overview
 
-`langchain-azure-ai` adapts Microsoft Foundry and Azure services to LangChain
-and LangGraph interfaces. This overview helps contributors understand component
-boundaries, dependencies, data flows, and testing layers. Detailed behavior,
-configuration contracts, and acceptance cases belong in the corresponding
-feature designs.
+`langchain-azure-ai` provides LangChain and LangGraph components to call
+Microsoft Foundry models, host agent applications in Foundry, and connect to
+Foundry agents and Azure resources. This overview helps contributors understand
+component boundaries, dependencies, data flows, and testing layers. Detailed
+behavior, configuration contracts, and acceptance cases belong in the
+corresponding feature designs.
 
 ## System boundaries
 
