@@ -1,51 +1,55 @@
-# langchain-azure-ai architecture
+# Overview
 
 `langchain-azure-ai` adapts Microsoft Foundry and Azure services to LangChain
-and LangGraph interfaces. This document describes the package's component
-boundaries, data flows, state ownership, and testing layers. Detailed
+and LangGraph interfaces. This overview helps contributors understand component
+boundaries, dependencies, data flows, state ownership, and testing layers. Detailed
 behavior and acceptance cases belong in the corresponding feature designs.
 
 ## System boundaries
 
 The layers group components by responsibility. The process boundary separates
 local libraries from remote services. Applications select the components they
-need. Deep Agents builds on LangChain and LangGraph.
+need. Deep Agents builds on LangChain and LangGraph. Arrows point from each
+adapter to its main library dependencies.
 
 ```mermaid
 %%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 25}}}%%
 flowchart TB
-    subgraph process["Application process"]
+    subgraph process["<b>Application process</b>"]
         direction TB
-        app["Application code<br/>Define the workflow and configuration."]
-        subgraph frameworks["Frameworks"]
+        app["<b>Application code</b><br/>Define the workflow and configuration."]
+        subgraph frameworks["<b>Frameworks</b>"]
             direction LR
-            deep["Deep Agents<br/>Add planning, subagents, files, and skills."]
-            langchain["LangChain<br/>Define components and agent loops."]
-            langgraph["LangGraph<br/>Execute graphs and manage graph state."]
+            deep["<b>Deep Agents</b><br/>Add planning, subagents, files, and skills."]
+            langchain["<b>LangChain</b><br/>Define components and agent loops."]
+            langgraph["<b>LangGraph</b><br/>Execute graphs and manage graph state."]
             deep ~~~ langchain ~~~ langgraph
         end
-        subgraph package["langchain-azure-ai · Adapt Azure services and hosting protocols."]
-            direction LR
-            models["Models<br/>Chat / embeddings"]
-            agents["Agent Service<br/>Remote agent nodes"]
-            integrations["Azure integrations<br/>Tools / data / observability"]
-            hosting["Hosting<br/>Graph / protocol mapping"]
-            models ~~~ agents ~~~ integrations ~~~ hosting
+        subgraph package["<b>langchain-azure-ai</b> · Adapt Azure services and hosting protocols."]
+            models["<b>Models</b><br/>Chat / embeddings"]
+            agents["<b>Agent Service</b><br/>Remote agent nodes"]
+            integrations["<b>Azure integrations</b><br/>Tools / data / observability"]
+            hosting["<b>Hosting</b><br/>Graph / protocol mapping"]
         end
-        subgraph support["Supporting libraries"]
-            direction LR
-            server["Agent Server SDK (hosting extra)<br/>Serve protocol APIs and manage the host."]
-            clients["Azure / OpenAI / Anthropic / MCP clients<br/>Handle authentication and service calls."]
-            server ~~~ clients
+        subgraph support["<b>Dependencies</b>"]
+            providers["<b>Model provider libraries</b><br/>LangChain providers / OpenAI / Anthropic"]
+            agentClients["<b>Agent Service clients</b><br/>Azure AI Projects / OpenAI"]
+            resourceClients["<b>Resource clients</b><br/>Azure service SDKs / MCP"]
+            server["<b>Agent Server SDK</b><br/>Serve protocol APIs and manage the host."]
         end
-        app ~~~ frameworks ~~~ package ~~~ support
+        app ~~~ frameworks
+        frameworks ~~~ models & agents & integrations & hosting
+        models -->|depends on| providers
+        agents -->|depends on| agentClients
+        integrations -->|depends on| resourceClients
+        hosting -->|depends on| server
     end
-    subgraph remote["Azure services · Execute remote operations and retain service-managed data."]
+    subgraph remote["<b>Azure services</b> · Execute remote operations and retain service-managed data."]
         direction LR
-        foundryModels["Foundry models"]
-        foundryAgents["Foundry Agent Service"]
-        foundryServices["Foundry services<br/>State Store / Toolbox / Memory"]
-        azure["Azure resources<br/>Search / storage / databases / other services"]
+        foundryModels["<b>Foundry models</b>"]
+        foundryAgents["<b>Foundry Agent Service</b>"]
+        foundryServices["<b>Foundry services</b><br/>State Store / Toolbox / Memory"]
+        azure["<b>Azure resources</b><br/>Search / storage / databases / other services"]
         foundryModels ~~~ foundryAgents ~~~ foundryServices ~~~ azure
     end
     process ~~~ remote
@@ -62,61 +66,27 @@ and execution-state mapping on the Agent Server SDK. See
 [Responses hosting](hosting/responses.md) and
 [Invocations hosting](hosting/invocations.md) for supported adapter behavior.
 
-## Components
+## Scenarios and components
 
-Component links point to their source under `langchain_azure_ai`. Public
-package exports are the application entry points; internal modules implement
-the adapters.
-
-| Component | Main entry points | Responsibility |
-| --- | --- | --- |
-| [Chat models](../langchain_azure_ai/chat_models/) | `AzureAIOpenAIApiChatModel`, `AzureAIAnthropicChatModel` | Extend `ChatOpenAI` and `ChatAnthropic` with Foundry endpoint and authentication handling. |
-| [Embeddings](../langchain_azure_ai/embeddings/) | `AzureAIOpenAIApiEmbeddingsModel` | Extend `OpenAIEmbeddings` for Foundry configuration and embedding requests. |
-| [Agent Service](../langchain_azure_ai/agents/__init__.py) | `AgentServiceFactory`, `ResponsesAgentNode`, `AgentServiceAgentState` | Create or reference remote Foundry agents and compose them as graph nodes, including local tool and approval handling. |
-| [Hosting](../langchain_azure_ai/agents/hosting/) | `ResponsesHostServer`, `InvocationsHostServer`, [configuration runner](../langchain_azure_ai/agents/hosting/run.py) | Serve a graph through Responses or HTTP Invocations; translate protocol input, graph output, interrupts, and recovery state. |
-| [Checkpoint persistence](../langchain_azure_ai/agents/hosting/_checkpoint/) | `FoundryCheckpointSaver` | Implement the async LangGraph checkpoint contract on Foundry State Store. |
-| [Middleware](../langchain_azure_ai/agents/middleware/) | Content Safety middleware, `AzureAIMemoryMiddleware` | Apply service-backed controls at supported agent, model, and tool hooks; synchronize selected messages to Foundry Memory. |
-| [Tools](../langchain_azure_ai/tools/) | `AzureAIServicesToolkit`, service tools, `AzureAIProjectToolbox`, `tools.builtin` | Expose local service-calling tools, managed MCP tools and resources, and server-side tool definitions. |
-| [Retrieval](../langchain_azure_ai/retrievers/) and [vector stores](../langchain_azure_ai/vectorstores/) | `AzureAISearchRetriever`, `AzureSearch`, `AzureAIMemoryRetriever` | Map searches and memory retrieval to LangChain documents; manage vector ingestion and search through the vector-store interface. |
-| [Cache](../langchain_azure_ai/vectorstores/cache.py) | `AzureCosmosDBMongoVCoreSemanticCache` | Reuse model generations through semantic lookup, with entries scoped to the model configuration. |
-| [Chat history](../langchain_azure_ai/chat_history/) | `AzureAIMemoryChatMessageHistory` | Wrap transcript storage and forward messages for long-term memory extraction. |
-| [Document loading](../langchain_azure_ai/document_loaders/) | `AzureAIContentUnderstandingLoader` | Analyze documents and media, then map content, fields, and source metadata to LangChain documents. |
-| [Tracing](../langchain_azure_ai/callbacks/tracers/) | `AzureAIOpenTelemetryTracer`, `enable_auto_tracing` | Convert LangChain callbacks into OpenTelemetry spans and metrics; support explicit callbacks and automatic callback injection. |
-| [Evaluation](../langchain_azure_ai/evaluation/) | `FoundryEvaluator`, `FoundryEvaluatorSuite`, evaluation subgraph helpers | Convert evaluation inputs, run Foundry evaluators, interpret results, and compose bounded evaluate/refine loops. |
-
-Shared configuration lives in [`_resources.py`](../langchain_azure_ai/_resources.py)
-and [`utils/`](../langchain_azure_ai/utils/). [`_user_agent.py`](../langchain_azure_ai/_user_agent.py)
-provides package attribution, and [`_api/`](../langchain_azure_ai/_api/)
-provides experimental and deprecation warnings. Several public namespaces
-load feature implementations lazily.
-
-The Cosmos DB vector-store, chat-history, NoSQL semantic-cache, and
-[query-translator](../langchain_azure_ai/query_constructors/cosmosdb_no_sql.py)
-compatibility modules forward to the separate `langchain-azure-cosmosdb` package. That
-package also provides graph checkpoint and Store implementations. The
-remaining semantic-cache implementation in this package uses its vector-store
-client. See the [Cosmos DB package](../../azure-cosmosdb/README.md) for those
-components and their installation requirements.
-
-## Data flows
-
-The scenarios show how requests and results move through the components.
+The diagrams show how requests and results move through the components.
 Solid arrows carry requests or writes; dotted arrows carry results.
+Component links point to source under `langchain_azure_ai`. Public package
+exports are the application entry points.
 
 ### Call Microsoft Foundry models
 
 ```mermaid
 flowchart LR
-    subgraph process["Application process"]
-        app["Application"]
-        model["langchain-azure-ai<br/>Chat models / embeddings"]
-        clients["Provider libraries<br/>and service clients"]
+    subgraph process["<b>Application process</b>"]
+        app["<b>Application</b>"]
+        model["<b>langchain-azure-ai</b><br/>Chat models / embeddings"]
+        clients["<b>Provider libraries</b><br/>and service clients"]
         app -->|Messages / text| model
         model -->|Provider input| clients
         model -.->|Messages / deltas / vectors| app
         clients -.->|Provider output| model
     end
-    models["Foundry models"]
+    models["<b>Foundry models</b>"]
     clients -->|API request| models
     models -.->|Model output| clients
 ```
@@ -127,15 +97,20 @@ implementation and service client. Calls return LangChain messages or
 embedding vectors. Applications can invoke these components directly or use
 them inside an agent.
 
+| Component | Main entry points | Responsibility |
+| --- | --- | --- |
+| [Chat models](../langchain_azure_ai/chat_models/) | `AzureAIOpenAIApiChatModel`, `AzureAIAnthropicChatModel` | Extend `ChatOpenAI` and `ChatAnthropic` with Foundry endpoint and authentication handling. |
+| [Embeddings](../langchain_azure_ai/embeddings/) | `AzureAIOpenAIApiEmbeddingsModel` | Extend `OpenAIEmbeddings` for Foundry configuration and embedding requests. |
+
 ### Host applications as Foundry hosted agents
 
 ```mermaid
-flowchart TB
-    caller["HTTP client"]
-    subgraph hosting["Foundry hosted agent container"]
-        server["Agent Server SDK<br/>Responses / Invocations"]
-        adapter["langchain-azure-ai<br/>Graph hosting adapter"]
-        workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents"]
+flowchart LR
+    caller["<b>HTTP client</b>"]
+    subgraph hosting["<b>Foundry hosted agent container</b>"]
+        server["<b>Agent Server SDK</b><br/>Responses / Invocations"]
+        adapter["<b>langchain-azure-ai</b><br/>Graph hosting adapter"]
+        workflow["<b>Application graph</b><br/>LangChain / LangGraph<br/>Deep Agents"]
         server -->|Protocol input| adapter
         adapter -->|Graph input| workflow
         workflow -.->|Graph output / events| adapter
@@ -152,37 +127,38 @@ translates between the protocol and the application graph. See
 [Invocations hosting](hosting/invocations.md) for protocol behavior, interrupts,
 and recovery.
 
+| Component | Main entry points | Responsibility |
+| --- | --- | --- |
+| [Hosting](../langchain_azure_ai/agents/hosting/) | `ResponsesHostServer`, `InvocationsHostServer`, [configuration runner](../langchain_azure_ai/agents/hosting/run.py) | Serve a graph through Responses or HTTP Invocations; translate protocol input, graph output, interrupts, and recovery state. |
+| [Checkpoint persistence](../langchain_azure_ai/agents/hosting/_checkpoint/) | `FoundryCheckpointSaver` | Implement the async LangGraph checkpoint contract on Foundry State Store. |
+
+**Installation:** `langchain-azure-ai[hosting]` supplies the hosting dependencies
+for the adapters and `FoundryCheckpointSaver`.
+
 ### Connect applications to agents and Azure resources
 
-```mermaid
-flowchart LR
-    workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents"]
-    node["langchain-azure-ai<br/>ResponsesAgentNode"]
-    agent["Foundry Agent Service<br/>Remote agent"]
-    resources["langchain-azure-ai<br/>Azure tools / retrieval / loaders"]
-    azure["Azure services<br/>Tools / search / analysis / memory"]
-    cosmos["langchain-azure-cosmosdb<br/>Checkpointer / Store"]
-    database["Azure Cosmos DB"]
-    storage["langchain-azure-storage<br/>Blob loader / AzureBlobBackend"]
-    blobs["Azure Blob Storage"]
+Connect a graph to remote agents, tools, data, and persistence through
+LangChain, LangGraph, and Deep Agents interfaces.
 
-    workflow -->|Agent input| node
-    node -->|Responses request| agent
-    agent -.->|Response items / events| node
-    node -.->|Graph state update| workflow
-    workflow -->|Tool input / query / source| resources
-    resources -->|Service request| azure
-    azure -.->|Service result| resources
-    resources -.->|Tool result / documents| workflow
-    workflow -->|Checkpoints / Store operations| cosmos
-    cosmos -->|Database operations| database
-    database -.->|Stored records| cosmos
-    cosmos -.->|Checkpoints / Store values| workflow
-    workflow -->|Document / file operations| storage
-    storage -->|Blob operations| blobs
-    blobs -.->|Blob contents / metadata| storage
-    storage -.->|Documents / file contents| workflow
-```
+| Integration type | Main entry points | Input and result |
+| --- | --- | --- |
+| [Graph nodes](../langchain_azure_ai/agents/__init__.py) | `AgentServiceFactory`, `ResponsesAgentNode`, `AgentServiceAgentState` | Graph messages go to a remote Foundry agent; response items become graph state updates. The local graph handles local tools and approvals. |
+| [Tools, skills and MCPs](../langchain_azure_ai/tools/) | `AzureAIServicesToolkit`, service tools, `AzureAIProjectToolbox`, `tools.builtin` | Tool arguments produce service results. Toolbox supplies MCP tools, resources, and skills; built-in definitions configure server-side tools. |
+| [Checkpointers](../../azure-cosmosdb/README.md#langgraph-checkpointer) | `CosmosDBSaver`, `CosmosDBSaverSync` | Persist and load graph checkpoints and pending writes in Cosmos DB. |
+| [Stores](../../azure-cosmosdb/README.md#langgraph-store-long-term-memory) | `CosmosDBStore`, `AsyncCosmosDBStore` | Keys, values, and queries write or retrieve data shared across graph threads. |
+| [Memory](../langchain_azure_ai/chat_history/) | `AzureAIMemoryChatMessageHistory`, `AzureAIMemoryRetriever`, `AzureAIMemoryMiddleware` | Forward selected messages to Foundry Memory for extraction; retrieve memories by store and scope. The base chat-history implementation owns the transcript. |
+| [Vector stores](../langchain_azure_ai/vectorstores/) and [retrievers](../langchain_azure_ai/retrievers/) | `AzureSearch`, `AzureAISearchRetriever` | Documents and vectors populate a search index; queries return LangChain documents. |
+| [Semantic cache](../langchain_azure_ai/vectorstores/cache.py) | `AzureCosmosDBMongoVCoreSemanticCache` | Model-scoped semantic lookup returns cached generations or records new ones. |
+| [Document loaders](../langchain_azure_ai/document_loaders/) | `AzureAIContentUnderstandingLoader`, `AzureBlobStorageLoader` | Source documents or media become LangChain documents with content and metadata. Content Understanding analyzes inputs; the Blob loader downloads and parses them. |
+| [Backends](../../azure-storage/README.md#deep-agents-azure-blob-storage-backend-usage) | `AzureBlobBackend` | Deep Agents file operations read or write workspace files in Blob Storage. |
+
+**Additional dependencies:** `langchain-azure-ai[tools]` supplies SDKs for the
+service tools. Toolbox MCP tools and resources require `langchain-mcp-adapters`
+and `httpx`; Toolbox skill file mappings also require `deepagents`.
+
+**Separate packages:** Cosmos DB checkpointers and Stores come from
+`langchain-azure-cosmosdb`. The Blob document loader and filesystem backend
+come from `langchain-azure-storage`.
 
 `ResponsesAgentNode` calls a remote Foundry agent from the application's graph.
 `AgentServiceFactory` can create or reference that agent. See the
@@ -198,6 +174,28 @@ its files or backend and use
 for its file workspace. Checkpoints, long-term memory, source documents, and
 workspace files have separate roles. Each package owns its adapters and service
 configuration.
+
+The Cosmos DB vector-store, chat-history, NoSQL semantic-cache, and
+[query-translator](../langchain_azure_ai/query_constructors/cosmosdb_no_sql.py)
+compatibility modules forward to the separate `langchain-azure-cosmosdb` package. That
+package also provides graph checkpoint and Store implementations. The
+remaining semantic-cache implementation in this package uses its vector-store
+client. See the [Cosmos DB package](../../azure-cosmosdb/README.md) for those
+components and their installation requirements.
+
+## Shared components
+
+Middleware, observability, and evaluation support applications across the
+scenarios above.
+
+| Component | Main entry points | Responsibility |
+| --- | --- | --- |
+| [Middleware](../langchain_azure_ai/agents/middleware/) | Content Safety middleware, `AzureAIMemoryMiddleware` | Apply service-backed controls at supported agent, model, and tool hooks; synchronize selected messages to Foundry Memory. |
+| [Observability](../langchain_azure_ai/callbacks/tracers/) | `AzureAIOpenTelemetryTracer`, `enable_auto_tracing` | Convert LangChain callbacks into OpenTelemetry spans and metrics; support explicit callbacks and automatic callback injection. |
+| [Evaluation](../langchain_azure_ai/evaluation/) | `FoundryEvaluator`, `FoundryEvaluatorSuite`, evaluation subgraph helpers | Convert evaluation inputs, run Foundry evaluators, interpret results, and compose bounded evaluate/refine loops. |
+
+**Installation:** `langchain-azure-ai[opentelemetry]` supplies the tracing and
+Azure Monitor dependencies.
 
 ## State and resource ownership
 
@@ -234,6 +232,12 @@ checkpoint selection, and durability. See
 and the [storage client scope](../langchain_azure_ai/agents/hosting/_storage/state_store_factory.py).
 
 ## Shared configuration and compatibility
+
+Shared configuration lives in [`_resources.py`](../langchain_azure_ai/_resources.py)
+and [`utils/`](../langchain_azure_ai/utils/). [`_user_agent.py`](../langchain_azure_ai/_user_agent.py)
+provides package attribution, and [`_api/`](../langchain_azure_ai/_api/)
+provides experimental and deprecation warnings. Several public namespaces
+load feature implementations lazily.
 
 Model adapters support Foundry project endpoints and direct service endpoints.
 They resolve constructor arguments, environment variables, and credentials
