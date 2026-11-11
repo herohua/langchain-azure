@@ -7,21 +7,53 @@ behavior and acceptance cases belong in the corresponding feature designs.
 
 ## System boundaries
 
-The layers group responsibilities. Applications select the components they need.
+The layers group components by responsibility. The process boundary separates
+local libraries from remote services. Applications select the components they
+need. Deep Agents builds on LangChain and LangGraph.
 
 ```mermaid
-block-beta
-    columns 1
-    app["Application<br/>Define prompts, graph topology, tools, persistence, and deployment."]
-    deep["Deep Agents (optional)<br/>Add planning, subagents, files, context management, and skills."]
-    framework["LangChain and LangGraph<br/>Define component interfaces and execute agents and graphs."]
-    adapters["langchain-azure-ai<br/>Adapt Azure services and hosting protocols to framework interfaces."]
-    block:support
-        columns 2
-        server["Agent Server SDK (hosting extra)<br/>Serve HTTP protocols and provide host infrastructure."]
-        clients["Azure / OpenAI / Anthropic / MCP clients<br/>Provide authentication, transport, and service APIs."]
+%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 25}}}%%
+flowchart TB
+    subgraph process["Application process"]
+        direction TB
+        app["Application code<br/>Define the workflow and configuration."]
+        subgraph frameworks["Frameworks"]
+            direction LR
+            deep["Deep Agents (optional)<br/>Add planning, subagents, files, and skills."]
+            langchain["LangChain<br/>Define components and agent loops."]
+            langgraph["LangGraph<br/>Execute graphs and manage graph state."]
+            deep ~~~ langchain ~~~ langgraph
+        end
+        subgraph package["langchain-azure-ai · Adapt Azure services and hosting protocols."]
+            direction LR
+            models["Models<br/>Chat / embeddings"]
+            agents["Agent Service<br/>Remote agent nodes"]
+            integrations["Azure integrations<br/>Tools / data / observability"]
+            hosting["Hosting<br/>Graph / protocol mapping"]
+            models ~~~ agents ~~~ integrations ~~~ hosting
+        end
+        subgraph support["Supporting libraries"]
+            direction LR
+            server["Agent Server SDK (hosting extra)<br/>Serve protocol APIs and manage the host."]
+            clients["Azure / OpenAI / Anthropic / MCP clients<br/>Handle authentication and service calls."]
+            server ~~~ clients
+        end
+        app ~~~ frameworks ~~~ package ~~~ support
     end
-    services["Azure services<br/>Execute remote operations and retain service-managed data."]
+    subgraph remote["Azure services · Execute remote operations and retain service-managed data."]
+        direction LR
+        foundryModels["Foundry models"]
+        foundryAgents["Foundry Agent Service / State Store"]
+        azure["Azure resources<br/>Search / storage / databases / other services"]
+        foundryModels ~~~ foundryAgents ~~~ azure
+    end
+    process ~~~ remote
+    style process fill:#f8fafc,stroke:#64748b
+    style frameworks fill:#eff6ff,stroke:#3b82f6
+    style package fill:#ecfdf5,stroke:#059669
+    style support fill:#eff6ff,stroke:#3b82f6
+    style remote fill:#fffbeb,stroke:#d97706
+    classDef default fill:#ffffff,stroke:#94a3b8
 ```
 
 The hosting adapters implement the graph handlers and their input, output,
