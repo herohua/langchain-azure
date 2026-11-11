@@ -2,7 +2,7 @@
 
 `langchain-azure-ai` adapts Microsoft Foundry and Azure services to LangChain
 and LangGraph interfaces. This document describes the package's component
-boundaries, execution paths, state ownership, and testing layers. Detailed
+boundaries, usage scenarios, state ownership, and testing layers. Detailed
 behavior and acceptance cases belong in the corresponding feature designs.
 
 ## System boundaries
@@ -10,36 +10,6 @@ behavior and acceptance cases belong in the corresponding feature designs.
 Applications compose the integrations they need. A model, retriever, loader,
 or tool can run directly, inside a LangChain agent, or as part of a LangGraph
 workflow. Hosting exposes an application graph through an HTTP protocol.
-
-The diagram shows composition and service use. Dashed arrows mark optional
-application choices.
-
-```mermaid
-flowchart TB
-    app["Application"]
-    deep["Deep Agents (optional)"]
-    frameworks["LangChain and LangGraph"]
-
-    subgraph package["langchain-azure-ai"]
-        adapters["Azure component adapters"]
-        hosting["Graph hosting adapters"]
-    end
-
-    server["Agent Server SDK<br/>Core + Responses / Invocations"]
-    clients["Service client libraries"]
-    services["Azure services"]
-
-    app -->|defines graph with| frameworks
-    app -.-> deep
-    deep -->|builds on| frameworks
-    app -.-> hosting
-    hosting -->|executes graph with| frameworks
-    frameworks -->|invokes| adapters
-    hosting -->|uses| server
-    adapters -->|calls| clients
-    clients -->|requests| services
-    server -->|hosted storage| services
-```
 
 | Layer | Responsibility |
 | --- | --- |
@@ -92,74 +62,95 @@ remaining semantic-cache implementation in this package uses its vector-store
 client. See the [Cosmos DB package](../../azure-cosmosdb/README.md) for those
 components and their installation requirements.
 
-## Primary execution paths
+## Usage scenarios
 
-### Calling models and services from a local graph
+The following views show model calls, agent execution, and integration with
+other agents and resources. Applications can combine them in the same graph.
 
-1. The application creates a component with its endpoint, model or resource
-   selection, and credentials.
-2. The adapter resolves configuration and constructs or selects a service
-   client. Model adapters extend the corresponding LangChain provider classes.
-3. LangChain or LangGraph invokes the component. The adapter submits the
-   service request and returns messages, documents, embeddings, or tool results.
+### Models
 
-Local tools execute in the application process and can call remote services.
-`tools.builtin` describes tools executed by the model service.
-`AzureAIProjectToolbox` discovers tools and resources through a managed MCP
-endpoint. Its adapters expose tools to the local agent and can map skills to
-Deep Agents files or a backend.
+```mermaid
+flowchart LR
+    subgraph process["Application process"]
+        app["Application"]
+        model["langchain-azure-ai<br/>Chat models / embeddings"]
+        clients["Provider libraries<br/>and service clients"]
+        app -->|LangChain interface| model --> clients
+    end
+    models["Foundry models"]
+    clients --> models
+```
 
-Content Safety and memory middleware participate through agent hooks. Their
-position in the execution path determines what they inspect or update. Tracer
-callbacks observe component and graph execution.
+The application selects a model, endpoint, and credentials. The model adapter
+resolves Foundry configuration and uses the corresponding LangChain provider
+implementation and service client. Calls return LangChain messages or
+embedding vectors. Applications can invoke these components directly or use
+them inside an agent.
 
-### Calling a remote Agent Service agent
+### Agents
 
-`AgentServiceFactory` can create an agent definition or reference an existing
-agent through `ResponsesAgentNode`.
+```mermaid
+flowchart TB
+    caller["Application / client"]
+    subgraph hosting["Optional hosting"]
+        server["Agent Server SDK<br/>Responses / Invocations"]
+        adapter["langchain-azure-ai<br/>Graph hosting adapter"]
+        server --> adapter
+    end
+    workflow["Agent graph<br/>LangChain / LangGraph<br/>Deep Agents (optional)"]
+    adapter --> workflow
+    caller -->|invoke / stream| workflow
+    caller -.->|optional HTTP hosting| server
+```
 
-1. The node converts graph messages to an Agent Service Responses request and
-   selects the configured agent version.
-2. Agent Service runs the remote agent and its service-side tools. The node
-   maps output and pending calls back to graph messages and agent state.
-3. A factory-built graph routes local tool calls and MCP approval requests to
-   the corresponding nodes, then submits their results to Agent Service.
+The application builds an agent with LangChain, a custom LangGraph workflow,
+or Deep Agents. The framework owns the agent loop or graph execution; the
+application selects models, tools, middleware, and persistence. Deep Agents
+supplies a prebuilt harness with configurable tools and backends.
 
-`AgentServiceAgentState` carries the remote conversation ID, previous response
-ID, and pending-call type through graph execution. A graph checkpointer can
-persist those fields. Agent Service owns the remote conversation and response
-records.
+Applications can invoke the graph directly or expose it through a hosting
+adapter. For HTTP hosting, Agent Server accepts protocol requests and the
+adapter maps between protocol input/output and graph execution. Protocol
+behavior, interrupts, and recovery are described in
+[Responses hosting](hosting/responses.md) and
+[Invocations hosting](hosting/invocations.md).
 
-The factory supports agent-boundary and local tool-call middleware hooks.
-Model-boundary hooks apply to locally executed models; the remote agent
-encapsulates its model interaction. See the
-[factory contract](../langchain_azure_ai/agents/_v2/prebuilt/factory.py) and
+### Integrations
+
+```mermaid
+flowchart LR
+    workflow["Application graph<br/>LangChain / LangGraph<br/>Deep Agents (optional)"]
+    node["langchain-azure-ai<br/>ResponsesAgentNode"]
+    agent["Foundry Agent Service<br/>Remote agent"]
+    resources["langchain-azure-ai<br/>Azure tools / retrieval / loaders"]
+    cosmos["langchain-azure-cosmosdb<br/>Checkpointer / Store"]
+    loader["langchain-azure-storage<br/>Blob document loader"]
+    files["langchain-azure-storage<br/>AzureBlobBackend"]
+
+    workflow -->|agent node| node --> agent
+    workflow -->|tool / retrieval interfaces| resources
+    workflow -->|checkpoint / Store interfaces| cosmos
+    workflow -->|document loader interface| loader
+    workflow -->|Deep Agents filesystem backend| files
+```
+
+`AgentServiceFactory` creates or references a remote agent through
+`ResponsesAgentNode`. The node maps graph messages to service requests and
+maps results or pending calls back to graph state. The local graph handles
+local tools and approvals; Agent Service runs the remote agent and retains its
+conversation and response records. See the
 [Agent Service examples](azure_ai_agents_demo_v2.ipynb).
 
-### Hosting an application graph
-
-The application compiles its graph, configures a checkpointer when needed,
-and supplies the graph to a host. The host can create an Agent Server app or
-attach to a compatible app supplied by the application.
-
-1. The Agent Server protocol endpoint accepts the HTTP request and establishes
-   request context.
-2. The hosting adapter validates graph-specific requirements, selects graph
-   state, and converts input to messages or an interrupt-resume command.
-3. LangGraph executes the graph. The adapter maps output and progress to the
-   protocol's response, streaming, and persistence interfaces.
-
-Responses hosting maps graph messages, tool activity, reasoning, citations,
-attachments, and usage to Responses items and events. Its converters keep
-graph checkpoint references separate from public output. Invocations hosting
-provides a text-oriented HTTP contract with structured interrupt replies. Its
-direct and task-backed execution paths are selected by host options.
-
-Persistent background recovery composes Agent Server task and protocol state
-with LangGraph checkpoints. The adapter selects saved progress and resumes
-the graph, or replays input when no progress was saved. Applications own the
-replay safety of external effects. Recovery boundaries and supported option
-combinations are defined in the protocol-specific hosting documents.
+The graph can also access resources through tools, retrievers, loaders, and
+persistence interfaces. Applications can combine this package's components
+with a [Cosmos DB checkpointer or Store](../../azure-cosmosdb/README.md), a
+[Blob document loader](../../azure-storage/README.md#azure-blob-storage-document-loader-usage),
+or other LangChain integrations. Deep Agents can also load Toolbox skills into
+its files or backend and use
+[`AzureBlobBackend`](../../azure-storage/README.md#deep-agents-azure-blob-storage-backend-usage)
+for its file workspace. Checkpoints, long-term memory, source documents, and
+workspace files have separate roles. Each package owns its adapters and service
+configuration.
 
 ## State and resource ownership
 
