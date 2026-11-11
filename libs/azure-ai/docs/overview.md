@@ -2,8 +2,9 @@
 
 `langchain-azure-ai` adapts Microsoft Foundry and Azure services to LangChain
 and LangGraph interfaces. This overview helps contributors understand component
-boundaries, dependencies, data flows, state ownership, and testing layers. Detailed
-behavior and acceptance cases belong in the corresponding feature designs.
+boundaries, dependencies, data flows, and testing layers. Detailed behavior,
+configuration contracts, and acceptance cases belong in the corresponding
+feature designs.
 
 ## System boundaries
 
@@ -127,6 +128,10 @@ translates between the protocol and the application graph. See
 [Invocations hosting](hosting/invocations.md) for protocol behavior, interrupts,
 and recovery.
 
+Graph checkpoints retain execution state, while protocol storage retains request
+input, output, and status. See the
+[durable state model](hosting/response_resiliency.md#durable-state-model).
+
 | Component | Main entry points | Responsibility |
 | --- | --- | --- |
 | [Hosting](../langchain_azure_ai/agents/hosting/) | `ResponsesHostServer`, `InvocationsHostServer`, [configuration runner](../langchain_azure_ai/agents/hosting/run.py) | Serve a graph through Responses or HTTP Invocations; translate protocol input, graph output, interrupts, and recovery state. |
@@ -195,70 +200,8 @@ scenarios above.
 | [Evaluation](../langchain_azure_ai/evaluation/) | `FoundryEvaluator`, `FoundryEvaluatorSuite`, evaluation subgraph helpers | Convert evaluation inputs, run Foundry evaluators, interpret results, and compose bounded evaluate/refine loops. |
 
 **Installation:** `langchain-azure-ai[opentelemetry]` supplies the tracing and
-Azure Monitor dependencies.
-
-## State and resource ownership
-
-| State or resource | Owner and role |
-| --- | --- |
-| Graph definition and compiled graph | The application defines topology, state schema, prompts, models, and tools. LangGraph executes it. |
-| Graph checkpoints and pending writes | The configured LangGraph saver persists execution state. The application supplies the saver; `FoundryCheckpointSaver` is one implementation. |
-| Hosted response or invocation records | Protocol storage retains input, output, status, and execution metadata. Task and replay storage support the configured execution mode. |
-| Responses conversation head | `conversation_chain_store` retains the checkpoint reference used for ordinary checkpointed continuation. A branch selects its parent's exact checkpoint. |
-| Remote Agent Service conversation | Agent Service retains remote conversation data; the local graph carries the IDs needed for later requests. |
-| Chat transcript and long-term memory | A base chat-history implementation owns the transcript. Memory adapters forward selected messages for service-managed extraction and retrieve memories by store and scope. |
-| Search indexes and semantic cache entries | Search or database services retain indexed documents, vectors, and cached generations. Adapters define their schema and request mapping. |
-| Service clients and credentials | Components hold their configured clients. Their APIs define client reuse and cleanup; Responses hosting also binds storage-client reuse to a request. |
-
-Response storage, graph persistence, transcripts, and long-term memory have
-separate purposes and lifetimes. Retaining one does not establish recovery or
-retention for the others. See the
-[durable state model](hosting/response_resiliency.md#durable-state-model).
-
-State Store-backed adapters use Agent Server's local file storage during local
-development and Foundry State Store when hosted. Applications can also supply
-other LangGraph savers. See the [storage choices](hosting/responses.md#storage-choices).
-
-Some adapters also hold process-local state. For example, memory middleware
-buffers messages and tracks update progress on the middleware instance.
-Applications must account for instance reuse when choosing memory scopes and
-conversation boundaries.
-
-Hosted graph thread selection uses platform user context when available.
-Storage providers and state-store isolation settings participate in the same
-boundary. Request-local checkpoint and client reuse must preserve user scope,
-checkpoint selection, and durability. See
-[request preparation](../langchain_azure_ai/agents/hosting/_responses/request_preparation.py)
-and the [storage client scope](../langchain_azure_ai/agents/hosting/_storage/state_store_factory.py).
-
-## Shared configuration and compatibility
-
-Shared configuration lives in [`_resources.py`](../langchain_azure_ai/_resources.py)
-and [`utils/`](../langchain_azure_ai/utils/). [`_user_agent.py`](../langchain_azure_ai/_user_agent.py)
-provides package attribution, and [`_api/`](../langchain_azure_ai/_api/)
-provides experimental and deprecation warnings. Several public namespaces
-load feature implementations lazily.
-
-Model adapters support Foundry project endpoints and direct service endpoints.
-They resolve constructor arguments, environment variables, and credentials
-before calling the provider client. OpenAI-based chat and embedding models
-share configuration logic; Anthropic models use the Anthropic Foundry client.
-Service tools, middleware, and storage adapters have their own endpoint and
-credential requirements. Each component's contract defines its precedence and
-supported sync and async paths.
-
-The [package manifest](../pyproject.toml) defines dependency ranges and extras.
-`hosting`, `tools`, and `opentelemetry` enable the
-corresponding integrations. The `v1` extra supports deprecated Agent Service
-and inference implementations. Compatibility exports preserve older import
-paths while directing applications to current implementations.
-
-Tracing uses the OpenTelemetry provider and exporter configured for the
-process. Applications can attach the tracer explicitly or enable automatic
-callback injection. Content recording and state recording are separate
-controls. Hosting also adds outbound SDK attribution through User-Agent
-tokens. Its feature mask combines process registrations and request context;
-it should be interpreted according to that scope.
+Azure Monitor dependencies. See the [package manifest](../pyproject.toml) for
+dependency ranges and extras.
 
 ## Testing
 
