@@ -9,10 +9,8 @@ corresponding feature designs.
 
 ## System boundaries
 
-The layers group components by responsibility. The process boundary separates
-local libraries from remote services. Applications select the components they
-need. Deep Agents builds on LangChain and LangGraph. Arrows point from each
-adapter to its main library dependencies.
+The architecture is organized into layers for application code, frameworks,
+Azure adapters, dependencies, and remote Azure services.
 
 ```mermaid
 %%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 25}}}%%
